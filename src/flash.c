@@ -1,0 +1,103 @@
+#include "swd.h"
+#include "ap.h"
+#include "flash.h"
+
+#define BSY_RETRIES 200
+
+uint8_t flash_read_sr(uint32_t *sr)
+{
+    return mem_ap_read_word(FLASH_SR, sr);
+}
+
+static uint8_t flash_wait_busy(uint32_t *sr)
+{
+    for (uint16_t i = 0; i < BSY_RETRIES; i++) {
+        uint8_t ack = flash_read_sr(sr);
+        if (ack != SWD_ACK_OK)
+            return ack;
+        if (!(*sr & FLASH_SR_BSY))
+            return SWD_ACK_OK;
+    }
+
+    return SWD_TIMEOUT;
+}
+
+/* Clears the sticky status flags, which are write-1-to-clear. */
+static uint8_t flash_clear_sr(void)
+{
+    return mem_ap_write_word(FLASH_SR, FLASH_SR_EOP | FLASH_SR_ERRORS);
+}
+
+uint8_t flash_unlock(void)
+{
+    uint8_t ack = mem_ap_write_word(FLASH_KEYR, FLASH_KEY1);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    return mem_ap_write_word(FLASH_KEYR, FLASH_KEY2);
+}
+
+uint8_t flash_lock(void)
+{
+    return mem_ap_write_word(FLASH_CR, FLASH_CR_LOCK);
+}
+
+uint8_t flash_program_word(uint32_t addr, uint32_t value)
+{
+    uint32_t sr = 0;
+    uint8_t ack = flash_wait_busy(&sr);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    ack = flash_clear_sr();
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    ack = mem_ap_write_word(FLASH_CR, FLASH_CR_PSIZE_X32 | FLASH_CR_PG);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    /* The controller intercepts this bus write and programs the word. */
+    ack = mem_ap_write_word(addr, value);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    ack = flash_wait_busy(&sr);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    mem_ap_write_word(FLASH_CR, 0);
+
+    return (sr & FLASH_SR_ERRORS) ? FLASH_ERR : SWD_ACK_OK;
+}
+
+uint8_t flash_erase_sector(uint8_t sector)
+{
+    uint32_t sr = 0;
+    uint8_t ack = flash_wait_busy(&sr);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    ack = flash_clear_sr();
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    uint32_t cr = FLASH_CR_PSIZE_X32 | FLASH_CR_SER
+                | ((uint32_t)sector << FLASH_CR_SNB_SHIFT);
+
+    ack = mem_ap_write_word(FLASH_CR, cr);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    ack = mem_ap_write_word(FLASH_CR, cr | FLASH_CR_STRT);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    ack = flash_wait_busy(&sr);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    mem_ap_write_word(FLASH_CR, 0);
+
+    return (sr & FLASH_SR_ERRORS) ? FLASH_ERR : SWD_ACK_OK;
+}
