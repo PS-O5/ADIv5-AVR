@@ -11,6 +11,14 @@ uint8_t dp_write(uint8_t addr, uint32_t data)
     return swd_transfer_retry(0, 0, addr, &data);
 }
 
+/* ORUNERRCLR | WDERRCLR | STKERRCLR | STKCMPCLR */
+#define ABORT_CLEAR_ALL 0x1E
+
+uint8_t dp_clear_errors(void)
+{
+    return dp_write(DP_ABORT, ABORT_CLEAR_ALL);
+}
+
 #define POWER_UP_RETRIES 32
 
 uint8_t dp_power_up(void)

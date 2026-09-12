@@ -18,5 +18,6 @@ uint8_t dp_read(uint8_t addr, uint32_t *data);
 uint8_t dp_write(uint8_t addr, uint32_t data);
 
 uint8_t dp_power_up(void);
+uint8_t dp_clear_errors(void);
 
 #endif

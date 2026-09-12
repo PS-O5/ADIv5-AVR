@@ -29,6 +29,32 @@ uint8_t mem_ap_init(void)
     if (ack != SWD_ACK_OK)
         return ack;
 
-    uint32_t csw = CSW_SIZE_WORD | CSW_ADDRINC_SINGLE;
+    uint32_t csw = CSW_PROT_DEBUG | CSW_SIZE_WORD | CSW_ADDRINC_SINGLE;
     return ap_write(AP_CSW, csw);
+}
+
+uint8_t mem_ap_read_word(uint32_t addr, uint32_t *value)
+{
+    uint8_t ack = ap_select(0, 0x0);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    ack = ap_write(AP_TAR, addr);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    return ap_read(AP_DRW, value);
+}
+
+uint8_t mem_ap_write_word(uint32_t addr, uint32_t value)
+{
+    uint8_t ack = ap_select(0, 0x0);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    ack = ap_write(AP_TAR, addr);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    return ap_write(AP_DRW, value);
 }

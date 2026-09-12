@@ -108,6 +108,18 @@ sees a new packet.
 every `ap_read()` follows up with a read of the DP RDBUFF register to collect the value it
 actually asked for.
 
+**CSW needs its Prot bits set.** Size and auto-increment alone are not enough. Bits
+[30:24] are IMPLEMENTATION DEFINED in ADIv5, so the spec cannot tell you what to put
+there. For a Cortex-M AHB-AP they carry MasterType=Debug (bit 29) and HPROT[1]=privileged
+(bit 25), with bit 24 set by convention, giving `0x23000000`. Leave them clear and the AHB
+transaction is rejected, STICKYERR latches, and every AP access afterwards returns FAULT
+until it is cleared. The DP-level accesses keep working throughout, which makes it look
+like a memory problem rather than a configuration one.
+
+**Sticky errors survive.** They persist until explicitly cleared by a write to the ABORT
+register, and a line reset does not touch them. Neither does a target reset, since the
+debug logic sits in its own power domain so that debugging can survive a system reset.
+
 ## Target gotchas
 
 If firmware on the STM32 reconfigures PA13/PA14 as ordinary GPIO, the SWD function is
@@ -121,24 +133,50 @@ left to reconfigure them.
 
 ## Status
 
-DP and MEM-AP are up. Current output:
+The full stack works: physical layer, SW-DP, both power domains, MEM-AP, AHB memory
+access, and core halt. Current output:
 
 ```
---- ADIv5-AVR ---
-IDCODE    ack=0x01 data=0x2BA01477
-PowerUp   ack=0x01
-CTRL/STAT ack=0x01 data=0xF0000000
-CSW write ack=0x01
-AP select ack=0x01
-AP IDR    ack=0x01 data=0x24770011
---- done ---
+IDCODE  ack=0x01 = 0x2BA01477
+PowerUp ack=0x01
+ClrErr  ack=0x01
+MEM-AP  ack=0x01
+CSW     ack=0x01 = 0x23000052
+
+CPUID   ack=0x01 = 0x410FC241
+DHCSR   ack=0x01 = 0x03090000
+DBGMCU  ack=0x01 = 0x10006431
+FLASH0  ack=0x01 = 0xFFFFFFFF
+UID0    ack=0x01 = 0x00230048
+
+halting core
+DHCSR write ack=0x01
+DHCSR   ack=0x01 = 0x01030003
 ```
 
-`0x2BA01477` is the ARM SW-DP. `0xF0000000` is both power domains requested and
-acknowledged (CSYSPWRUPREQ/ACK and CDBGPWRUPREQ/ACK). `0x24770011` decodes as JEP-106
-identity 0x3B (ARM), class 0x8 (MEM-AP), type 0x1 (AMBA AHB), which is the AHB-AP.
+What those values are:
 
-Next: memory reads and writes through TAR and DRW, then halting the core via DHCSR.
+| Value | Meaning |
+|-------|---------|
+| `0x2BA01477` | ARM SW-DP identification |
+| `0xF0000000` (CTRL/STAT) | Both power domains requested and acknowledged |
+| `0x24770011` (AP IDR) | JEP-106 identity 0x3B (ARM), class 0x8 (MEM-AP), type 0x1 (AHB), so the AHB-AP |
+| `0x23000052` (CSW) | What was written, plus DeviceEn (bit 6) set by hardware |
+| `0x410FC241` | Cortex-M4 r0p1 |
+| `0x10006431` | DEV_ID 0x431 (STM32F411), REV_ID 0x1000 |
+| `0x00230048` | First word of the 96-bit unique device ID |
+
+The two DHCSR reads tell a small story. Before halting it reads `0x03090000`, which has
+S_LOCKUP set: the flash is erased, so out of reset the core fetched `0xFFFFFFFF` as its
+stack pointer and reset vector, faulted, and locked up. After the halt it reads
+`0x01030003`, with S_HALT set and S_LOCKUP cleared.
+
+Halting needs a key. DHCSR writes are ignored unless bits [31:16] are `0xA05F`, so a halt
+is `0xA05F0003` (key plus C_DEBUGEN and C_HALT).
+
+Next: core register access through DCRSR and DCRDR, flash programming through the flash
+controller, and halt-on-reset via DEMCR so a target can be caught before its firmware
+runs.
 
 ## References
 
@@ -148,7 +186,9 @@ Next: memory reads and writes through TAR and DRW, then halting the core via DHC
   flags. Note that this revision predates the JTAG-to-SWD switch sequence, so `0xE79E` is
   not documented in it.
 - **STM32F411xC/E reference manual** (RM0383) **and datasheet**. PA13/PA14 defaulting to
-  the SWD alternate function out of reset, the 5V-tolerant pin list, and BOOT0 boot mode
-  selection.
+  the SWD alternate function out of reset, the 5V-tolerant pin list, BOOT0 boot mode
+  selection, DBGMCU_IDCODE, and the unique device ID location.
+- **ARMv7-M Architecture Reference Manual** (ARM DDI 0403). The debug register block at
+  `0xE000EDF0`: DHCSR bit assignments, the `0xA05F` write key, and CPUID decoding.
 - **ATmega328P datasheet**. DDRB/PORTB/PINB semantics including the input pull-up, USART
   registers, and the U2X baud rate calculation.
