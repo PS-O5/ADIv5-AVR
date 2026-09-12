@@ -70,6 +70,23 @@ def send_line(fd, text):
     os.write(fd, (text + "\r").encode())
 
 
+def wait_for_prompt(fd, timeout):
+    """Reads until the shell offers a prompt, which is the only reliable sign
+    it is listening. Sleeping for a guessed interval races the bootloader,
+    which eats anything sent before the firmware starts."""
+    buf = bytearray()
+    deadline = time.time() + timeout
+
+    while time.time() < deadline:
+        data = os.read(fd, 64)
+        if data:
+            buf += data
+            if buf.endswith(b"> "):
+                return buf.decode("ascii", "replace")
+
+    return None
+
+
 def send_file(fd, data):
     blocks = (len(data) + BLOCK - 1) // BLOCK
 
@@ -124,15 +141,33 @@ def main():
 
     fd = open_port(port)
     try:
-        # Opening the port resets the host board, so wait for its shell.
-        print("waiting for the host")
-        time.sleep(3)
-        drain(fd, 1.0)
+        # Do not assume the board just reset. Opening the port usually resets
+        # it, but not once HUPCL has been cleared, and then it is already
+        # sitting at a prompt and will say nothing until spoken to. Nudging
+        # with a bare line works either way: during boot the nudge is eaten and
+        # the next one lands.
+        timeout = float(os.environ.get("BOOT_WAIT", "20"))
+        print("waiting for the shell")
+
+        banner = None
+        deadline = time.time() + timeout
+
+        while time.time() < deadline and banner is None:
+            send_line(fd, "")
+            banner = wait_for_prompt(fd, 1.5)
+
+        if banner is None:
+            raise RuntimeError("no prompt from the host after %.0fs" % timeout)
+
+        print("host:", " ".join(banner.split()) or "(prompt)")
 
         send_line(fd, "u")
-        time.sleep(0.4)
-        unlock = drain(fd, 0.8).decode("ascii", "replace")
-        print("unlock:", " ".join(unlock.split()))
+        reply = wait_for_prompt(fd, 5.0)
+
+        if reply is None or "ok" not in reply:
+            raise RuntimeError("unlock not acknowledged: %r" % (reply,))
+
+        print("unlock: ok")
 
         send_line(fd, "l " + address)
 

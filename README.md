@@ -73,6 +73,11 @@ handing the port to `sx`. That matters because the shell echoes what it receives
 separate sender reads that echo as protocol bytes and gives up. Doing the transfer in one
 place avoids the problem entirely.
 
+It waits for the shell's prompt rather than sleeping for a guessed interval, and nudges
+with a bare line to get one. Sleeping races two different things: the bootloader, which
+runs first and eats anything sent before the firmware exists, and the board not resetting
+at all, which is what happens once something has cleared HUPCL on the port.
+
 The blinky is 84 bytes and has no startup code, because nothing in it has an initialiser
 to copy and nothing lives in `.bss`, so the reset vector points straight at the loop. Its
 vector table is the same two words we were writing by hand earlier: the initial stack
@@ -393,6 +398,7 @@ costs about one transaction per word instead of three.
 | `src/rtt.c` | Finds the SEGGER RTT control block in target RAM and drains its ring buffers. |
 | `target/` | A small STM32 blinky, for testing the whole chain against real firmware. |
 | `tools/swdflash` | Host side flasher: drives the shell and sends a binary over XMODEM. |
+| `tools/swdmon` | Dumps whatever the board sends, for when the flasher itself is suspect. |
 | `src/flash.c` | STM32F4 flash controller. Unlock, word programming, sector erase. |
 | `src/shell.c` | The UART command shell. String literals live in `PROGMEM` so they cost flash rather than the 2KB of SRAM. |
 | `src/xmodem.c` | XMODEM receive, programming each block into flash as it arrives. |
@@ -581,6 +587,36 @@ confirmation prompt in front of an irreversible operation.
 Mass erase and dropping protection both ask for a typed confirmation, and mass erase halts
 the core first, for the same reason a sector erase does.
 
+### A dropped byte, five steps from its symptom
+
+A flash through the tool once failed with nothing more than "target cancelled at block 1",
+and the chain behind it is worth writing down.
+
+The firmware had no interrupt driven receive. `uart_getc` polled the hardware flag, and the
+ATmega holds two bytes, so anything arriving while the firmware was busy elsewhere was
+simply gone. At startup it is busy connecting to the target, so an `u` sent by a script
+during that window vanished. Flash therefore stayed locked, the first erase inside the
+transfer returned `FLASH_LOCKED`, the loader cancelled, and the host reported a cancelled
+block. Five steps, and the report named none of them.
+
+It was intermittent for the obvious reason: whether the byte survived depended on what the
+firmware happened to be doing when it arrived.
+
+Two fixes, and neither alone was enough. A receive ring filled by `USART_RX_vect` covers
+bytes that arrive while the firmware is busy, which is the common case of typing ahead or
+pasting. Waiting for the prompt covers the window before the firmware is running at all,
+where no amount of buffering helps because nothing is listening yet.
+
+Interrupts being enabled during bit-banging looks alarming and is not: SWD is driven
+entirely by the host's clock and has no maximum period, so an interrupt that delays an edge
+only stretches that clock cycle. The target samples wherever the edges land.
+
+Two smaller lessons fell out of it. A check that can pass for the wrong reason is barely a
+check: the first attempt at verifying the unlock searched for `ok` in a buffer that also
+held the banner, which contains `ok`. And clearing HUPCL so that closing the port would not
+reset the board mid-transfer also stopped opening it from resetting the board, which
+silently removed the banner a later version depended on, from the second run onward.
+
 ### Timeouts belong in milliseconds
 
 Flash timeouts were originally poll counts, which really means "however long N SWD
@@ -708,8 +744,8 @@ and reading it back, verifies byte for byte against the image that went in.
 ### Footprint
 
 ```
-Program:  18390 bytes (56.1% of 32KB flash)
-Data:       256 bytes (12.5% of 2KB SRAM)
+Program:  18616 bytes (56.8% of 32KB flash)
+Data:       322 bytes (15.7% of 2KB SRAM)
 ```
 
 The Uno's bootloader occupies the top of flash, so the usable figure is a little under

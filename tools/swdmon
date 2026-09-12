@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""Dump whatever the host board sends, with no interpretation.
+
+    tools/swdmon [seconds]
+
+Opens the port the same way swdflash does, so if this shows nothing then the
+problem is below the flasher rather than in it.
+"""
+
+import os
+import sys
+import termios
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+def open_port(path):
+    fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
+    a = termios.tcgetattr(fd)
+    cc = list(a[6])
+    cc[termios.VMIN] = 0
+    cc[termios.VTIME] = 1
+    termios.tcsetattr(fd, termios.TCSANOW,
+                      [0, 0,
+                       termios.CS8 | termios.CREAD | termios.CLOCAL,
+                       0, termios.B115200, termios.B115200, cc])
+    return fd
+
+
+def main():
+    seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 15.0
+    port = os.environ.get("PORT", "/dev/ttyACM0")
+
+    print("listening on %s for %.0fs" % (port, seconds))
+    fd = open_port(port)
+
+    total = bytearray()
+    deadline = time.time() + seconds
+
+    try:
+        while time.time() < deadline:
+            data = os.read(fd, 256)
+            if data:
+                total += data
+                sys.stdout.write(data.decode("ascii", "replace"))
+                sys.stdout.flush()
+    finally:
+        os.close(fd)
+
+    print("\n\n--- %d bytes ---" % len(total))
+    if total:
+        print("last 16 bytes:", " ".join("%02X" % b for b in total[-16:]))
+        print("ends with '> ':", total.endswith(b"> "))
+    else:
+        print("nothing received at all")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

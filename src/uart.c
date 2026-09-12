@@ -1,16 +1,41 @@
 #include <avr/io.h>
+#include <avr/interrupt.h>
 #include <util/delay.h>
 #include "uart.h"
 
 #define BAUD 115200UL
 #define UBRR_VALUE ((F_CPU / (8UL * BAUD)) - 1)
 
+/*
+ * Receive ring. Without it anything arriving while the firmware is busy is
+ * lost: the hardware holds two bytes and there is nothing to move them. That
+ * silently drops commands sent by a script rather than typed, and the symptom
+ * is a later operation failing for no visible reason.
+ */
+#define RX_SIZE 64
+
+static volatile uint8_t rx_buf[RX_SIZE];
+static volatile uint8_t rx_head;
+static volatile uint8_t rx_tail;
+
+ISR(USART_RX_vect)
+{
+    uint8_t c = UDR0;
+    uint8_t next = (uint8_t)((rx_head + 1) & (RX_SIZE - 1));
+
+    /* Drop on overflow rather than overwrite what has not been read yet. */
+    if (next != rx_tail) {
+        rx_buf[rx_head] = c;
+        rx_head = next;
+    }
+}
+
 void uart_init(void)
 {
     UCSR0A = (1 << U2X0);
     UBRR0H = (uint8_t)(UBRR_VALUE >> 8);
     UBRR0L = (uint8_t)UBRR_VALUE;
-    UCSR0B = (1 << TXEN0) | (1 << RXEN0);
+    UCSR0B = (1 << TXEN0) | (1 << RXEN0) | (1 << RXCIE0);
     UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);
 }
 
@@ -23,22 +48,29 @@ void uart_putc(char c)
 
 uint8_t uart_available(void)
 {
-    return (UCSR0A & (1 << RXC0)) ? 1 : 0;
+    return rx_head != rx_tail;
+}
+
+static char rx_take(void)
+{
+    char c = (char)rx_buf[rx_tail];
+    rx_tail = (uint8_t)((rx_tail + 1) & (RX_SIZE - 1));
+    return c;
 }
 
 char uart_getc(void)
 {
-    while (!(UCSR0A & (1 << RXC0)))
+    while (rx_head == rx_tail)
         ;
-    return UDR0;
+    return rx_take();
 }
 
 int16_t uart_getc_timeout(uint16_t ms)
 {
     while (ms--) {
         for (uint8_t i = 0; i < 10; i++) {
-            if (UCSR0A & (1 << RXC0))
-                return UDR0;
+            if (rx_head != rx_tail)
+                return (uint8_t)rx_take();
             _delay_us(100);
         }
     }
