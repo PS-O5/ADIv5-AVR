@@ -5,6 +5,7 @@
 #include "cortex.h"
 #include "flash.h"
 #include "fpb.h"
+#include "dwt.h"
 #include "uart.h"
 #include "xmodem.h"
 #include "shell.h"
@@ -34,6 +35,9 @@ static const char help_text[] PROGMEM =
     "b              list breakpoints\r\n"
     "b <addr>       set hardware breakpoint\r\n"
     "k [slot]       clear one breakpoint, or all\r\n"
+    "a              list watchpoints\r\n"
+    "a <addr> [rwb] watch: r read, w write, b both\r\n"
+    "j [slot]       clear one watchpoint, or all\r\n"
     "?              this help\r\n";
 
 static void puts_P(const char *s)
@@ -200,6 +204,7 @@ static void cmd_connect(void)
     ack = mem_ap_init();
     if (ack == SWD_ACK_OK) {
         fpb_init();
+        dwt_init();
         flash_probe();
     }
 
@@ -441,6 +446,84 @@ static void cmd_save(uint32_t addr, uint32_t length)
     default:              uart_puts("target read failed"); break;
     }
     nl();
+}
+
+static void watch_mode(uint8_t function)
+{
+    if (function == DWT_FUNC_READ)
+        uart_puts("read ");
+    else if (function == DWT_FUNC_WRITE)
+        uart_puts("write");
+    else if (function == DWT_FUNC_RW)
+        uart_puts("both ");
+    else
+        uart_puts("off  ");
+}
+
+static void cmd_watch_list(void)
+{
+    uart_print_dec(dwt_slots());
+    uart_puts(" watchpoint slots\r\n");
+
+    for (uint8_t i = 0; i < dwt_slots(); i++) {
+        uint32_t addr = 0;
+        uint8_t function = 0, matched = 0;
+
+        if (dwt_get(i, &addr, &function, &matched) != SWD_ACK_OK)
+            continue;
+
+        uart_puts("  ");
+        uart_print_dec(i);
+        uart_puts("  ");
+        watch_mode(function);
+        if (function != DWT_FUNC_DISABLED) {
+            uart_puts("  ");
+            put_hex32(addr);
+            if (matched)
+                uart_puts("  matched");
+        }
+        nl();
+    }
+}
+
+static void cmd_watch_set(uint32_t addr, char mode)
+{
+    uint8_t function = DWT_FUNC_RW;
+
+    if (mode == 'r')
+        function = DWT_FUNC_READ;
+    else if (mode == 'w')
+        function = DWT_FUNC_WRITE;
+
+    for (uint8_t i = 0; i < dwt_slots(); i++) {
+        uint32_t cur = 0;
+        uint8_t cur_func = 0, matched = 0;
+
+        uint8_t ack = dwt_get(i, &cur, &cur_func, &matched);
+        if (ack != SWD_ACK_OK) {
+            report(ack);
+            return;
+        }
+        if (cur_func != DWT_FUNC_DISABLED)
+            continue;
+
+        ack = dwt_set(i, addr, function);
+        if (ack != SWD_ACK_OK) {
+            report(ack);
+            return;
+        }
+
+        uart_puts("watchpoint ");
+        uart_print_dec(i);
+        uart_puts(" on ");
+        watch_mode(function);
+        uart_puts(" at ");
+        put_hex32(addr);
+        nl();
+        return;
+    }
+
+    uart_puts("no free slots\r\n");
 }
 
 static void cmd_break_list(void)
@@ -729,6 +812,26 @@ static void dispatch(const char *line)
             cmd_break_list();
         break;
 
+    case 'a':
+        if (parse_hex(&line, &a)) {
+            while (*line == ' ')
+                line++;
+            cmd_watch_set(a, *line);
+        } else {
+            cmd_watch_list();
+        }
+        break;
+
+    case 'j':
+        if (parse_dec(&line, &a)) {
+            report(dwt_clear((uint8_t)a));
+        } else {
+            for (uint8_t i = 0; i < dwt_slots(); i++)
+                dwt_clear(i);
+            uart_puts("all cleared\r\n");
+        }
+        break;
+
     case 'k':
         if (parse_dec(&line, &a)) {
             report(fpb_clear((uint8_t)a));
@@ -760,7 +863,12 @@ static void dispatch(const char *line)
                 uart_puts("need a value to write\r\n");
                 break;
             }
-            report(cortex_write_reg(reg, b));
+
+            uint8_t ack = cortex_write_reg(reg, b);
+            if (ack == CORTEX_NOT_HALTED)
+                uart_puts("core is running, halt first\r\n");
+            else
+                report(ack);
         }
         break;
 

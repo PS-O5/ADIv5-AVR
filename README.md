@@ -57,34 +57,91 @@ The firmware presents a shell over UART at 115200 baud:
 screen /dev/ttyACM0 115200
 ```
 
-## Shell
+## Command guide
 
-It connects on startup and gives a `>` prompt. Numbers are hex, with or without `0x`.
+It connects on startup and gives a `>` prompt. Addresses and values are hex, with or
+without `0x`. Counts, sizes, register names and slot numbers are decimal. A command is a
+single letter, and anything else is rejected rather than guessed at, so `pc 20000000` is
+an error instead of being read as `p` with an argument of `c`.
 
-| Command | Does |
-|---------|------|
-| `c` | connect: line reset, switch sequence, power up, MEM-AP setup |
+**Connection and identity**
+
+| | |
+|---|---|
+| `c` | connect: line reset, switch sequence, power up, MEM-AP, FPB, DWT, flash probe |
 | `i` | DPIDR, AP IDR, CPUID, DBGMCU |
-| `r <addr> [sz]` | read, size 1, 2 or 4 bytes, default 4 |
-| `d <addr> [n]` | dump n words, four per line, default 8 |
-| `w <addr> <val> [sz]` | write, size 1, 2 or 4 bytes, default 4 |
-| `f` | flash size and sector map |
-| `h` / `g` | halt / resume |
-| `t` | reset and halt |
 | `s` | DHCSR, with halted and lockup decoded |
-| `u` | unlock flash |
+
+**Memory**
+
+| | |
+|---|---|
+| `r <addr> [sz]` | read one value, size 1, 2 or 4 bytes, default 4 |
+| `w <addr> <val> [sz]` | write one value, same sizes |
+| `d <addr> [n]` | dump n words, four per line, default 8 |
+
+**Execution**
+
+| | |
+|---|---|
+| `h` | halt |
+| `g` | resume |
+| `t` | reset and halt, catching the core at the vector fetch |
+| `n [count]` | step one instruction, or count of them |
+| `m [count]` | step with interrupts masked |
+| `x` | show all core registers, halted only |
+| `x <reg> <val>` | write a register: `r0` to `r12`, `sp`, `lr`, `pc`, `psr` |
+
+**Breakpoints and watchpoints**
+
+| | |
+|---|---|
+| `b` | list breakpoints, with the FPB revision and slot count |
+| `b <addr>` | set a hardware breakpoint in the first free slot |
+| `k [slot]` | clear one breakpoint, or all of them |
+| `a` | list watchpoints |
+| `a <addr> [r\|w\|b]` | watch an address on read, write, or both, default both |
+| `j [slot]` | clear one watchpoint, or all of them |
+
+**Flash**
+
+| | |
+|---|---|
+| `f` | flash size and sector map |
+| `u` | unlock the flash controller |
 | `e <sector\|addr>` | erase a sector, by number or by an address inside it |
 | `p <addr> <val>` | program one flash word |
-| `l <addr>` | load a binary over XMODEM |
-| `y <addr> <len>` | save memory to a file over XMODEM |
-| `x` | core registers, halted only |
-| `x <reg> <val>` | write a register: `r0`-`r12`, `sp`, `lr`, `pc`, `psr` |
-| `n [count]` | step one instruction |
-| `m [count]` | step with interrupts masked |
-| `b` | list breakpoints |
-| `b <addr>` | set a hardware breakpoint |
-| `k [slot]` | clear one breakpoint, or all |
-| `?` | help |
+
+**Transfer**
+
+| | |
+|---|---|
+| `l <addr>` | receive a binary over XMODEM and program it |
+| `y <addr> <len>` | send memory over XMODEM to a file |
+
+### A worked session
+
+Program a small routine into flash, break on it, and inspect:
+
+```
+> u
+> e 0
+> p 08000000 20001000     vector table: initial stack pointer
+> p 08000004 08000009     reset vector, thumb bit set
+> p 08000008 BF00BF00     nop, nop
+> p 0800000C E7FEBF00     nop, branch to self
+> t
+> b 0800000A
+> g
+> x
+```
+
+Halting first matters more than it looks. Memory access works on a running core because it
+goes through the AP, but register access does not: reading or writing a core register while
+the core runs is UNPREDICTABLE, and erasing flash underneath a core that is fetching from
+it never completes.
+
+### Reading the debug registers
 
 ```
 > i
@@ -165,6 +222,37 @@ DHCSR 0x01030003  halted=y lockup=n
 The core ran from the reset vector, executed the first NOP, and halted before executing
 the instruction at the breakpoint address.
 
+### Watchpoints
+
+The DWT unit at `0xE0001000` halts on a data access rather than an instruction address,
+which is what catches memory being corrupted by code you have not identified yet. Each
+comparator is a 16 byte block of COMP, MASK and FUNCTION, and NUMCOMP in the top nibble of
+DWT_CTRL says how many there are. The F411 has four.
+
+The unit is gated behind TRCENA, bit 24 of DEMCR, and does nothing at all until that is
+set. Arming a watchpoint without it looks like it worked and never fires. MASK is how many
+low address bits to ignore, and is left at zero here so the match is on the exact address.
+
+Watching a word, then running a routine that stores to it:
+
+```
+> a 20000000 w
+watchpoint 0 on write at 0x20000000
+> g
+> s
+DHCSR 0x01030003  halted=y lockup=n
+> x
+r0  000000AA  r1  20000000 ... pc  20000108
+> r 20000000
+0x20000000: 000000AA
+> a
+4 watchpoint slots
+  0  write  0x20000000  matched
+```
+
+The core halted just past the store, the value made it to memory, and the comparator
+reports that it matched. Nothing was watching the PC.
+
 ### Loading a binary
 
 `l <addr>` receives a raw binary over XMODEM and programs it as it arrives, one 128-byte
@@ -220,6 +308,7 @@ costs about one transaction per word instead of three.
 | `src/ap.c` | Access Port. AP register access and MEM-AP setup. |
 | `src/cortex.c` | ARMv7-M debug. Halt, resume, reset-halt, stepping and core registers through DHCSR, DEMCR, AIRCR and DCRSR/DCRDR. |
 | `src/fpb.c` | Hardware breakpoints through the FPB unit, handling both comparator formats. |
+| `src/dwt.c` | Data watchpoints through the DWT unit. |
 | `src/flash.c` | STM32F4 flash controller. Unlock, word programming, sector erase. |
 | `src/shell.c` | The UART command shell. Help text lives in `PROGMEM` so it costs flash rather than the 2KB of SRAM. |
 | `src/xmodem.c` | XMODEM receive, programming each block into flash as it arrives. |
@@ -499,16 +588,16 @@ across 1KB  ack=0x01 256 bytes in 57 ms  verify OK
 The second write starts at `0x080003F0` deliberately, so it straddles the 1KB boundary
 where TAR auto-increment stops being guaranteed.
 
-Working: connect, power up, read and write memory, halt, resume, reset-halt, single
-stepping, core registers, hardware breakpoints, flash erase and programming, loading a
-binary over serial, and reading memory back out to a file.
+Working: connect, power up, read and write memory at byte, halfword and word size, halt,
+resume, reset-halt, single stepping, core registers, hardware breakpoints, data
+watchpoints, flash erase and programming, loading a binary over serial, and reading memory
+back out to a file.
 
 A round trip through the shell, programming a small routine into flash, breaking on it,
 and reading it back, verifies byte for byte against the image that went in.
 
-Possible next steps: data watchpoints through the DWT, byte and halfword access through
-the CSW Size field, and using the device ID to pick the flash geometry rather than
-assuming it.
+Possible next steps: mass erase, and reading the option bytes so read protection is
+reported rather than discovered.
 
 ## References
 

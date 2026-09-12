@@ -55,7 +55,16 @@ uint8_t cortex_read_reg(uint8_t reg, uint32_t *value)
 
 uint8_t cortex_write_reg(uint8_t reg, uint32_t value)
 {
-    uint8_t ack = mem_ap_write_word(DCRDR, value);
+    /* Same rule as reading: the transfer is UNPREDICTABLE on a running core. */
+    uint32_t dhcsr = 0;
+    uint8_t ack = cortex_read_dhcsr(&dhcsr);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    if (!(dhcsr & DHCSR_S_HALT))
+        return CORTEX_NOT_HALTED;
+
+    ack = mem_ap_write_word(DCRDR, value);
     if (ack != SWD_ACK_OK)
         return ack;
 
