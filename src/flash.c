@@ -71,6 +71,45 @@ uint8_t flash_program_word(uint32_t addr, uint32_t value)
     return (sr & FLASH_SR_ERRORS) ? FLASH_ERR : SWD_ACK_OK;
 }
 
+/* TAR auto-increment is only guaranteed across the bottom 10 address bits. */
+#define TAR_BOUNDARY 1024UL
+
+uint8_t flash_write(uint32_t addr, const uint32_t *words, uint16_t count)
+{
+    uint32_t sr = 0;
+    uint8_t ack = flash_wait_busy(&sr);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    ack = flash_clear_sr();
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    ack = mem_ap_write_word(FLASH_CR, FLASH_CR_PSIZE_X32 | FLASH_CR_PG);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    ack = ap_select(0, 0x0);
+
+    for (uint16_t i = 0; i < count && ack == SWD_ACK_OK; i++) {
+        uint32_t target = addr + 4UL * i;
+
+        if (i == 0 || (target & (TAR_BOUNDARY - 1)) == 0)
+            ack = ap_write(AP_TAR, target);
+
+        if (ack == SWD_ACK_OK)
+            ack = ap_write(AP_DRW, words[i]);
+    }
+
+    flash_wait_busy(&sr);
+    mem_ap_write_word(FLASH_CR, 0);
+
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    return (sr & FLASH_SR_ERRORS) ? FLASH_ERR : SWD_ACK_OK;
+}
+
 uint8_t flash_erase_sector(uint8_t sector)
 {
     uint32_t sr = 0;

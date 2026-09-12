@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 void swd_init(void);
+void swd_set_speed(uint8_t loops);
 
 void swd_write_bit(uint8_t bit);
 uint8_t swd_read_bit(void);

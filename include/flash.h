@@ -36,6 +36,7 @@ uint8_t flash_unlock(void);
 uint8_t flash_lock(void);
 uint8_t flash_read_sr(uint32_t *sr);
 uint8_t flash_program_word(uint32_t addr, uint32_t value);
+uint8_t flash_write(uint32_t addr, const uint32_t *words, uint16_t count);
 uint8_t flash_erase_sector(uint8_t sector);
 
 #endif

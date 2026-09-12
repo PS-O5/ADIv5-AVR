@@ -37,6 +37,25 @@ void uart_print_hex8(uint8_t value)
     uart_putc(nibble_to_hex(value & 0xF));
 }
 
+void uart_print_dec(uint32_t value)
+{
+    char buf[10];
+    uint8_t n = 0;
+
+    if (value == 0) {
+        uart_putc('0');
+        return;
+    }
+
+    while (value) {
+        buf[n++] = '0' + (value % 10);
+        value /= 10;
+    }
+
+    while (n)
+        uart_putc(buf[--n]);
+}
+
 void uart_print_hex32(uint32_t value)
 {
     for (int8_t shift = 24; shift >= 0; shift -= 8)

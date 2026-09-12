@@ -64,6 +64,8 @@ screen /dev/ttyACM0 115200
 | `src/swd.c` | Physical layer. Clock/data bit-banging, turnaround, line reset, connect sequence, and the generic DP/AP transfer. |
 | `src/dp.c` | Debug Port. Register reads/writes and the debug/system power-up handshake. |
 | `src/ap.c` | Access Port. AP register access and MEM-AP setup. |
+| `src/cortex.c` | ARMv7-M debug. Halt, resume, and reset-halt through DHCSR, DEMCR and AIRCR. |
+| `src/flash.c` | STM32F4 flash controller. Unlock, word programming, sector erase. |
 | `src/uart.c` | Minimal UART transmit and hex printing. Hand-rolled instead of `stdio.h`, which would cost over a kilobyte of flash. |
 
 ## Protocol notes
@@ -120,6 +122,72 @@ like a memory problem rather than a configuration one.
 register, and a line reset does not touch them. Neither does a target reset, since the
 debug logic sits in its own power domain so that debugging can survive a system reset.
 
+**TAR auto-increment stops at 1KB.** With AddrInc enabled the MEM-AP increments TAR after
+every DRW access, which is what makes bulk transfers cheap: one transaction per word
+instead of three. The spec only guarantees the increment across the bottom 10 bits, so
+behaviour at a 1KB boundary is IMPLEMENTATION DEFINED. Bulk writes rewrite TAR at every
+1KB crossing rather than trusting it.
+
+## Target control
+
+Two key-protected registers, both of which ignore writes without the right key in bits
+[31:16]. That is deliberate: it stops a stray bus write from dropping the core into debug
+state or resetting the chip.
+
+| Register | Key | Purpose |
+|----------|-----|---------|
+| DHCSR `0xE000EDF0` | `0xA05F` | C_DEBUGEN and C_HALT to halt the core, S_HALT to confirm |
+| AIRCR `0xE000ED0C` | `0x05FA` | SYSRESETREQ to reset the system |
+
+Halt-on-reset combines those with DEMCR `0xE000EDFC`. Setting VC_CORERESET (bit 0) arms a
+vector catch, then SYSRESETREQ resets the chip and the core halts at the vector fetch
+before executing an instruction. The system reset does not touch the debug power domain,
+so the SWD connection survives it and no NRST wire is needed.
+
+This is the fix for a target whose firmware reconfigures PA13/PA14. Catch the core before
+its firmware runs and the pins stay in SWD mode. Note that DEMCR lives in the debug power
+domain: the vector catch survives a system reset but not a power cycle, so arm it and
+reset rather than arming it and hoping.
+
+## Flash programming
+
+The flash controller is memory-mapped at `0x40023C00`, so programming is ordinary MEM-AP
+writes to peripheral registers.
+
+FLASH_CR is locked at reset. Unlocking means writing `0x45670123` then `0xCDEF89AB` to
+FLASH_KEYR, in that order; a wrong sequence locks the controller until the next reset. To
+program, set PG with PSIZE=x32 and then write the word to its flash address directly. The
+controller intercepts the bus write. Poll BSY (FLASH_SR bit 16) afterwards and check the
+error flags.
+
+Flash only changes bits from 1 to 0, so a word has to be erased before it is written.
+Programming a non-erased word sets PGSERR. Sectors on the F411 are not uniform: four of
+16KB, one of 64KB, then three of 128KB.
+
+One detail that looks like a bug and is not: EOP (FLASH_SR bit 0) stays clear after a
+successful operation, because it is only set when EOPIE is enabled. Success is the absence
+of error bits plus a readback that matches.
+
+A locked controller fails quietly. Writes to FLASH_CR are ignored while LOCK is set, so an
+erase requested before unlocking never starts, BSY never rises, no error bit is set, and
+the operation reports success having done nothing. Unlock first.
+
+### Speed
+
+Writing a word through `mem_ap_write_word` costs three transactions: bank select, TAR,
+then DRW. Bulk writes drop that to roughly one per word by selecting the bank and setting
+TAR once and then streaming DRW writes, letting auto-increment walk the address. That is
+where nearly all of the speed comes from.
+
+Measured on this hardware at the fastest bit-bang rate, 256 bytes takes 57ms, about
+4.4KB/s, so a 64KB image lands in roughly 15 seconds. The per-word path managed about
+32ms per word, which works out to around nine minutes for the same image.
+
+The SWD clock itself is not the bottleneck. Going from a 2us half period to no delay at
+all only moved a 256-byte write from 97ms to 57ms, because the fixed per-bit overhead of
+the bit-bang loop dominates. `swd_set_speed()` takes the half period in roughly 250ns
+units, and 0 runs the loop flat out.
+
 ## Target gotchas
 
 If firmware on the STM32 reconfigures PA13/PA14 as ordinary GPIO, the SWD function is
@@ -130,6 +198,13 @@ quick way to spot the problem.
 Two ways out. Hold BOOT0 during a power-on reset so the chip runs the ROM system
 bootloader, which never touches those pins. Or erase the flash so there is no firmware
 left to reconfigure them.
+
+The other one worth knowing about: the first connect straight after the host resets
+always fails, and retrying immediately does not help. Six back-to-back attempts fail and
+then every attempt succeeds once about 20ms has passed. Both boards run off the host's 5V
+rail, so resetting the host (which avrdude does on every flash) dips the target's
+regulator enough to reset it, and the DP does not answer until it has booted. `dp_connect()`
+handles this by spacing its retries out rather than hammering.
 
 ## Status
 
@@ -174,9 +249,25 @@ stack pointer and reset vector, faulted, and locked up. After the halt it reads
 Halting needs a key. DHCSR writes are ignored unless bits [31:16] are `0xA05F`, so a halt
 is `0xA05F0003` (key plus C_DEBUGEN and C_HALT).
 
-Next: core register access through DCRSR and DCRDR, flash programming through the flash
-controller, and halt-on-reset via DEMCR so a target can be caught before its firmware
-runs.
+Halt-on-reset, flash programming and bulk writes all work. A cold start at full speed:
+
+```
+connect  ack=0x01
+IDCODE = 0x2BA01477
+MEM-AP   ack=0x01
+rst+halt ack=0x01
+unlock   ack=0x01
+erase s0 ack=0x01
+
+plain       ack=0x01 256 bytes in 57 ms  verify OK
+across 1KB  ack=0x01 256 bytes in 57 ms  verify OK
+```
+
+The second write starts at `0x080003F0` deliberately, so it straddles the 1KB boundary
+where TAR auto-increment stops being guaranteed.
+
+Next: core register access through DCRSR and DCRDR, and a UART command shell so addresses
+and images can be given at runtime instead of being compiled in.
 
 ## References
 

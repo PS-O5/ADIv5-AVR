@@ -9,22 +9,21 @@
 #define LED_BIT PB5
 #define TEST_ADDR 0x08000000UL
 
-static void show(const char *label, uint8_t ack, uint32_t value)
+/* Timer1 at /1024: 15625 ticks per second, 64us per tick. */
+static void timer_start(void)
 {
-    uart_puts(label);
-    uart_puts(" ack=0x");
-    uart_print_hex8(ack);
-    uart_puts(" = 0x");
-    uart_print_hex32(value);
-    uart_puts("\r\n");
+    TCCR1A = 0;
+    TCCR1B = (1 << CS12) | (1 << CS10);
+    TCNT1 = 0;
 }
 
-static void dump(const char *label, uint32_t addr)
+static uint32_t timer_ms(void)
 {
-    uint32_t value = 0;
-    uint8_t ack = mem_ap_read_word(addr, &value);
-    show(label, ack, value);
+    return ((uint32_t)TCNT1 * 64UL) / 1000UL;
 }
+
+#define WORDS 64
+static uint32_t buf[WORDS];
 
 static void step(const char *label, uint8_t ack)
 {
@@ -34,44 +33,68 @@ static void step(const char *label, uint8_t ack)
     uart_puts("\r\n");
 }
 
+static uint8_t verify(uint32_t addr)
+{
+    for (uint16_t i = 0; i < WORDS; i++) {
+        uint32_t got = 0;
+        if (mem_ap_read_word(addr + 4UL * i, &got) != SWD_ACK_OK)
+            return 0;
+        if (got != buf[i])
+            return 0;
+    }
+    return 1;
+}
+
+static void bulk(const char *label, uint32_t addr)
+{
+    for (uint16_t i = 0; i < WORDS; i++)
+        buf[i] = 0xA5A50000UL | (uint32_t)i;
+
+    timer_start();
+    uint8_t ack = flash_write(addr, buf, WORDS);
+    uint32_t ms = timer_ms();
+
+    uart_puts(label);
+    uart_puts(" ack=0x");
+    uart_print_hex8(ack);
+    uart_puts(" ");
+    uart_print_dec(WORDS * 4UL);
+    uart_puts(" bytes in ");
+    uart_print_dec(ms);
+    uart_puts(" ms  verify ");
+    uart_puts(verify(addr) ? "OK" : "FAILED");
+    uart_puts("\r\n");
+}
+
 int main(void)
 {
     DDRB |= (1 << LED_BIT);
     uart_init();
 
-    uart_puts("\r\n--- ADIv5-AVR flash ---\r\n");
+    uart_puts("\r\n--- ADIv5-AVR bulk flash, max speed ---\r\n");
 
+    swd_set_speed(0);
     swd_init();
-    swd_connect();
 
     uint32_t idcode = 0;
-    step("IDCODE  ", dp_read(DP_DPIDR, &idcode));
+    step("connect ", dp_connect(&idcode));
+    uart_puts("IDCODE = 0x");
+    uart_print_hex32(idcode);
+    uart_puts("\r\n");
+
     dp_power_up();
     dp_clear_errors();
     step("MEM-AP  ", mem_ap_init());
     step("rst+halt", cortex_reset_halt());
-
-    uart_puts("\r\n");
-    dump("before  ", TEST_ADDR);
-    dump("before+4", TEST_ADDR + 4);
-
-    uart_puts("\r\n");
     step("unlock  ", flash_unlock());
-    step("write0  ", flash_program_word(TEST_ADDR, 0xDEADBEEFUL));
-    step("write1  ", flash_program_word(TEST_ADDR + 4, 0xCAFEBABEUL));
-
-    uint32_t sr = 0;
-    show("FLASH_SR", flash_read_sr(&sr), sr);
+    step("erase s0", flash_erase_sector(0));
 
     uart_puts("\r\n");
-    dump("after   ", TEST_ADDR);
-    dump("after+4 ", TEST_ADDR + 4);
+    bulk("plain      ", TEST_ADDR);
+    bulk("across 1KB ", TEST_ADDR + 0x3F0UL);
 
     uart_puts("\r\n");
     step("erase s0", flash_erase_sector(0));
-    dump("erased  ", TEST_ADDR);
-    dump("erased+4", TEST_ADDR + 4);
-
     step("lock    ", flash_lock());
 
     uart_puts("--- done ---\r\n");

@@ -5,18 +5,30 @@
 #define SWCLK_BIT PB0
 #define SWDIO_BIT PB1
 
-#define SWD_HALF_PERIOD_US 100
+/* Half-period in ~250ns loop iterations. 0 runs at the bit-bang loop's own rate. */
+static uint8_t half_period = 0;
+
+void swd_set_speed(uint8_t loops)
+{
+    half_period = loops;
+}
+
+static inline void swd_delay(void)
+{
+    for (uint8_t i = 0; i < half_period; i++)
+        __asm__ __volatile__("nop");
+}
 
 static inline void clock_low(void)
 {
     PORTB &= ~(1 << SWCLK_BIT);
-    _delay_us(SWD_HALF_PERIOD_US);
+    swd_delay();
 }
 
 static inline void clock_high(void)
 {
     PORTB |= (1 << SWCLK_BIT);
-    _delay_us(SWD_HALF_PERIOD_US);
+    swd_delay();
 }
 
 static inline void swdio_drive_low(void)
