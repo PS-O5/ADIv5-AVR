@@ -75,6 +75,8 @@ It connects on startup and gives a `>` prompt. Numbers are hex, with or without 
 | `e <sector>` | erase a flash sector |
 | `p <addr> <val>` | program one flash word |
 | `l <addr>` | load a binary over XMODEM |
+| `x` | core registers, halted only |
+| `x <n> <val>` | write core register n |
 | `?` | help |
 
 ```
@@ -132,7 +134,7 @@ Verify with a dump:
 | `src/swd.c` | Physical layer. Clock/data bit-banging, turnaround, line reset, connect sequence, and the generic DP/AP transfer. |
 | `src/dp.c` | Debug Port. Register reads/writes and the debug/system power-up handshake. |
 | `src/ap.c` | Access Port. AP register access and MEM-AP setup. |
-| `src/cortex.c` | ARMv7-M debug. Halt, resume, and reset-halt through DHCSR, DEMCR and AIRCR. |
+| `src/cortex.c` | ARMv7-M debug. Halt, resume, reset-halt and core register access through DHCSR, DEMCR, AIRCR and DCRSR/DCRDR. |
 | `src/flash.c` | STM32F4 flash controller. Unlock, word programming, sector erase. |
 | `src/shell.c` | The UART command shell. Help text lives in `PROGMEM` so it costs flash rather than the 2KB of SRAM. |
 | `src/xmodem.c` | XMODEM receive, programming each block into flash as it arrives. |
@@ -214,6 +216,36 @@ vector catch, then SYSRESETREQ resets the chip and the core halts at the vector 
 before executing an instruction. The system reset does not touch the debug power domain,
 so the SWD connection survives it and no NRST wire is needed.
 
+### Core registers
+
+The core registers are not memory mapped, so there is no address to read R0 from. Writing
+a selector to DCRSR `0xE000EDF4` moves a value between the register file and DCRDR
+`0xE000EDF8`, and S_REGRDY in DHCSR says when the transfer has happened. Setting REGWnR
+(bit 16) in the selector makes it a write, in which case DCRDR is loaded first. Selectors
+0 to 12 are R0 to R12, then 13 SP, 14 LR, 15 PC, 16 xPSR.
+
+The core has to be halted. Reading these while it runs is UNPREDICTABLE, so the shell
+refuses rather than printing something meaningless.
+
+Registers right after a reset-halt on a chip holding a test pattern:
+
+```
+> t
+ok
+> x
+r0  00000000  r1  00000000  r2  00000000  r3  00000000
+r4  00000000  r5  00000000  r6  00000000  r7  00000000
+r8  00000000  r9  00000000  r10 00000000  r11 00000000
+r12 00000000  sp  B0000000  lr  FFFFFFFF  pc  B0000000
+psr 01000000
+```
+
+Every value there can be traced back. SP is the first word of the vector table, which the
+core loads at reset, and PC is the second word with bit 0 masked off, because bit 0 of a
+reset vector marks Thumb state rather than forming part of the address. The T bit in xPSR
+(bit 24) is set to match, and the exception number is 0 for thread mode. LR reads
+`0xFFFFFFFF`, its reset value. Nothing has executed.
+
 This is the fix for a target whose firmware reconfigures PA13/PA14. Catch the core before
 its firmware runs and the pins stay in SWD mode. Note that DEMCR lives in the debug power
 domain: the vector catch survives a system reset but not a power cycle, so arm it and
@@ -240,7 +272,12 @@ of error bits plus a readback that matches.
 
 A locked controller fails quietly. Writes to FLASH_CR are ignored while LOCK is set, so an
 erase requested before unlocking never starts, BSY never rises, no error bit is set, and
-the operation reports success having done nothing. Unlock first.
+the operation reports success having done nothing. Erase and program check LOCK first and
+report `0xFC` rather than succeeding at nothing.
+
+The same class of mistake is worth watching for in the driver itself. Dropping PG or SER
+at the end of an operation is a bus access like any other, and ignoring its result hides a
+link failure until some later command trips over it.
 
 ### Speed
 
@@ -336,8 +373,12 @@ across 1KB  ack=0x01 256 bytes in 57 ms  verify OK
 The second write starts at `0x080003F0` deliberately, so it straddles the 1KB boundary
 where TAR auto-increment stops being guaranteed.
 
-Next: core register access through DCRSR and DCRDR, so registers and the PC can be read
-while halted.
+Everything the original goal called for works: connect, power up, read and write memory,
+halt, reset-halt, read and write core registers, erase and program flash, and load a
+binary over serial.
+
+Possible next steps: single stepping through DHCSR's C_STEP, breakpoints through the FPB,
+and reading flash back out to verify an image without a second tool.
 
 ## References
 

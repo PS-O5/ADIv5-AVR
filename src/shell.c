@@ -24,6 +24,8 @@ static const char help_text[] PROGMEM =
     "e <sector>     erase flash sector\r\n"
     "p <addr> <val> program flash word\r\n"
     "l <addr>       load binary via xmodem\r\n"
+    "x              core registers (halted only)\r\n"
+    "x <n> <val>    write core register n\r\n"
     "?              this help\r\n";
 
 static void puts_P(const char *s)
@@ -202,6 +204,56 @@ static void cmd_status(void)
     nl();
 }
 
+static void reg_label(uint8_t i)
+{
+    if (i < 13) {
+        uart_putc('r');
+        uart_print_dec(i);
+        if (i < 10)
+            uart_putc(' ');
+    } else if (i == REG_SP) {
+        uart_puts("sp ");
+    } else if (i == REG_LR) {
+        uart_puts("lr ");
+    } else if (i == REG_PC) {
+        uart_puts("pc ");
+    } else {
+        uart_puts("psr");
+    }
+}
+
+static void cmd_regs(void)
+{
+    uint32_t dhcsr = 0;
+    if (cortex_read_dhcsr(&dhcsr) != SWD_ACK_OK) {
+        uart_puts("cannot read DHCSR\r\n");
+        return;
+    }
+
+    if (!(dhcsr & DHCSR_S_HALT)) {
+        uart_puts("core is running, halt first\r\n");
+        return;
+    }
+
+    for (uint8_t i = 0; i <= REG_LAST; i++) {
+        uint32_t v = 0;
+        uint8_t ack = cortex_read_reg(i, &v);
+
+        reg_label(i);
+        uart_putc(' ');
+        if (ack == SWD_ACK_OK)
+            uart_print_hex32(v);
+        else
+            uart_puts("--------");
+
+        if ((i & 3) == 3)
+            nl();
+        else
+            uart_puts("  ");
+    }
+    nl();
+}
+
 static void cmd_load(uint32_t addr)
 {
     /* Halt first so the target is not running while its flash changes. */
@@ -360,6 +412,18 @@ static void dispatch(const char *line)
             break;
         }
         report(flash_program_word(a, b));
+        break;
+
+    case 'x':
+        if (parse_hex(&line, &a)) {
+            if (!parse_hex(&line, &b)) {
+                uart_puts("need a value to write\r\n");
+                break;
+            }
+            report(cortex_write_reg((uint8_t)a, b));
+        } else {
+            cmd_regs();
+        }
         break;
 
     case 'l':
