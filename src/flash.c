@@ -226,6 +226,34 @@ uint8_t flash_write(uint32_t addr, const uint32_t *words, uint16_t count)
     return flash_finish(ack, sr);
 }
 
+/*
+ * Reads back in small chunks so this costs stack rather than a second buffer
+ * the size of a transfer block.
+ */
+uint8_t flash_verify(uint32_t addr, const uint32_t *words, uint16_t count)
+{
+    uint32_t chunk[8];
+    uint16_t done = 0;
+
+    while (done < count) {
+        uint16_t n = count - done;
+        if (n > 8)
+            n = 8;
+
+        uint8_t ack = mem_ap_read_block(addr + 4UL * done, chunk, n);
+        if (ack != SWD_ACK_OK)
+            return ack;
+
+        for (uint16_t i = 0; i < n; i++)
+            if (chunk[i] != words[done + i])
+                return FLASH_VERIFY;
+
+        done += n;
+    }
+
+    return SWD_ACK_OK;
+}
+
 uint8_t flash_erase_sector(uint8_t sector)
 {
     if (sectors && sector >= sectors)

@@ -7,6 +7,7 @@
 #define XMODEM_TIMEOUT  1
 #define XMODEM_CANCELED 2
 #define XMODEM_FLASHERR 3
+#define XMODEM_VERIFY   4
 
 /* Diagnostics, since the transfer shares the UART and cannot print as it goes. */
 typedef struct {
@@ -18,6 +19,8 @@ typedef struct {
     int16_t first_byte;
     int16_t last_blk;
     int16_t last_inv;
+    int16_t last_sector;
+    uint8_t sectors_erased;
 } xmodem_stats;
 
 extern xmodem_stats xm_stats;

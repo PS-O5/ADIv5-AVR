@@ -37,6 +37,7 @@ uint8_t cortex_halt(void);
 uint8_t cortex_resume(void);
 uint8_t cortex_read_dhcsr(uint32_t *value);
 uint8_t cortex_reset_halt(void);
+uint8_t cortex_reset_run(void);
 
 /* Returned when an operation needs a halted core and the core is running. */
 #define CORTEX_NOT_HALTED 0xFB

@@ -75,6 +75,29 @@ uint8_t cortex_write_reg(uint8_t reg, uint32_t value)
     return wait_regrdy();
 }
 
+/* Resets without the vector catch, so the target boots its own firmware. */
+uint8_t cortex_reset_run(void)
+{
+    uint32_t demcr = 0;
+    uint8_t ack = mem_ap_read_word(DEMCR, &demcr);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    ack = mem_ap_write_word(DEMCR, demcr & ~DEMCR_VC_CORERESET);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    ack = cortex_resume();
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    /* The reset lands mid-transaction, so this access may not complete. */
+    mem_ap_write_word(AIRCR, AIRCR_VECTKEY | AIRCR_SYSRESETREQ);
+    dp_clear_errors();
+
+    return SWD_ACK_OK;
+}
+
 #define STEP_RETRIES 64
 
 /*

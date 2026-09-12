@@ -6,6 +6,7 @@
 #include "flash.h"
 #include "fpb.h"
 #include "dwt.h"
+#include "rtt.h"
 #include "uart.h"
 #include "xmodem.h"
 #include "shell.h"
@@ -21,6 +22,7 @@ static const char help_text[] PROGMEM =
     "h              halt\r\n"
     "g              resume\r\n"
     "t              reset and halt\r\n"
+    "q              reset and run\r\n"
     "s              status (DHCSR)\r\n"
     "u              unlock flash\r\n"
     "f              flash size and sector map\r\n"
@@ -41,6 +43,7 @@ static const char help_text[] PROGMEM =
     "a              list watchpoints\r\n"
     "a <addr> [rwb] watch: r read, w write, b both\r\n"
     "j [slot]       clear one watchpoint, or all\r\n"
+    "rtt [base] [n] stream RTT output from target RAM\r\n"
     "?              this help\r\n";
 
 /* Keeps string literals in flash. The AVR has 2KB of RAM and .data was eating it. */
@@ -190,6 +193,8 @@ static void read_line(char *buf)
     }
 }
 
+static uint32_t rtt_cb;
+
 static void cmd_connect(void)
 {
     uint32_t idcode = 0;
@@ -206,6 +211,8 @@ static void cmd_connect(void)
 
     dp_power_up();
     dp_clear_errors();
+
+    rtt_cb = 0;
 
     ack = mem_ap_init();
     if (ack == SWD_ACK_OK) {
@@ -459,6 +466,71 @@ static void cmd_unprotect(void)
     report(flash_remove_readout_protection());
 }
 
+static uint8_t word_is(const char *line, const char *word)
+{
+    while (*word) {
+        if (*line != *word)
+            return 0;
+        line++;
+        word++;
+    }
+
+    return *line == 0 || *line == ' ';
+}
+
+static void rtt_sink(char c)
+{
+    uart_putc(c);
+}
+
+static void cmd_rtt(const char *args)
+{
+    uint32_t base = 0x20000000UL;
+    uint32_t length = 128UL * 1024;
+
+    parse_hex(&args, &base);
+    parse_hex(&args, &length);
+
+    if (!rtt_cb) {
+        P("searching RAM for the control block\r\n");
+        uint8_t ack = rtt_find(base, length, &rtt_cb);
+
+        if (ack == RTT_NOT_FOUND) {
+            P("no control block: is RTT linked into the target?\r\n");
+            return;
+        }
+        if (ack != SWD_ACK_OK) {
+            report(ack);
+            return;
+        }
+    }
+
+    P("control block at ");
+    put_hex32(rtt_cb);
+
+    uint32_t up = 0;
+    if (rtt_up_count(rtt_cb, &up) == SWD_ACK_OK) {
+        P(", ");
+        uart_print_dec(up);
+        P(" up buffers");
+    }
+    P("\r\npress a key to stop\r\n");
+
+    while (!uart_available()) {
+        uint16_t got = 0;
+        uint8_t ack = rtt_drain(rtt_cb, 0, rtt_sink, &got);
+
+        if (ack != SWD_ACK_OK) {
+            nl();
+            report(ack);
+            return;
+        }
+    }
+
+    uart_getc();
+    P("\r\nstopped\r\n");
+}
+
 static void cmd_flash_info(void)
 {
     if (flash_probe() != SWD_ACK_OK) {
@@ -679,7 +751,7 @@ static void cmd_load(uint32_t addr)
     /* Halt first so the target is not running while its flash changes. */
     cortex_halt();
 
-    P("send binary now (erase the sectors first)\r\n");
+    P("send binary now, sectors are erased as it goes\r\n");
 
     uint32_t written = 0;
     uint8_t result = xmodem_receive_to_flash(addr, &written);
@@ -701,8 +773,13 @@ static void cmd_load(uint32_t addr)
     case XMODEM_OK:       P("ok");             break;
     case XMODEM_TIMEOUT:  P("timed out");      break;
     case XMODEM_CANCELED: P("canceled");       break;
+    case XMODEM_VERIFY:   P("verify failed, flash does not match"); break;
     default:              P("flash write failed"); break;
     }
+    nl();
+
+    P("sectors erased: ");
+    uart_print_dec(xm_stats.sectors_erased);
     nl();
 
     P("naks=");
@@ -751,11 +828,17 @@ static void dispatch(const char *line)
     line++;
 
     /*
-     * The command is one character. Without this, "pc 20000000" parses as p
-     * with an argument of c, which is a valid hex digit, and programs flash at
-     * address 0xC.
+     * The single letters are the whole alphabet by now, so longer names are
+     * matched whole. Matching the entire token keeps the property that
+     * "pc 20000000" is an error rather than p with an argument of c, which
+     * would program flash.
      */
     if (*line && *line != ' ') {
+        line--;
+        if (word_is(line, "rtt")) {
+            cmd_rtt(line + 3);
+            return;
+        }
         P("unknown command, ? for help\r\n");
         return;
     }
@@ -880,6 +963,11 @@ static void dispatch(const char *line)
 
     case 'v':
         cmd_unprotect();
+        break;
+
+    case 'q':
+        P("reset and run: ");
+        report(cortex_reset_run());
         break;
 
     case 'e':

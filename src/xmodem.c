@@ -46,6 +46,8 @@ uint8_t xmodem_receive_to_flash(uint32_t addr, uint32_t *bytes_written)
     xm_stats.first_byte = -1;
     xm_stats.last_blk = -1;
     xm_stats.last_inv = -1;
+    xm_stats.last_sector = -1;
+    xm_stats.sectors_erased = 0;
 
     /* Checksum mode: NAK until the sender starts, or it gives up. */
     for (uint8_t i = 0; i < START_RETRIES; i++) {
@@ -107,10 +109,34 @@ uint8_t xmodem_receive_to_flash(uint32_t addr, uint32_t *bytes_written)
                 if (good && (uint8_t)blk == expected) {
                     xm_stats.blocks_ok++;
                     pack(data);
+
+                    /*
+                     * Erase on entering a sector rather than up front, because
+                     * the total length is not known until EOT arrives. The
+                     * stream only moves forwards, so a sector being entered has
+                     * not been written to yet.
+                     */
+                    uint8_t sector = 0;
+                    if (flash_sector_of(addr, &sector) == SWD_ACK_OK
+                        && sector != xm_stats.last_sector) {
+                        if (flash_erase_sector(sector) != SWD_ACK_OK) {
+                            uart_putc(CAN);
+                            return XMODEM_FLASHERR;
+                        }
+                        xm_stats.last_sector = sector;
+                        xm_stats.sectors_erased++;
+                    }
+
                     if (flash_write(addr, words, WORDS) != SWD_ACK_OK) {
                         uart_putc(CAN);
                         return XMODEM_FLASHERR;
                     }
+
+                    if (flash_verify(addr, words, WORDS) != SWD_ACK_OK) {
+                        uart_putc(CAN);
+                        return XMODEM_VERIFY;
+                    }
+
                     addr += BLOCK;
                     *bytes_written += BLOCK;
                     expected++;

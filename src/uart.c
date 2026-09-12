@@ -21,6 +21,11 @@ void uart_putc(char c)
     UDR0 = c;
 }
 
+uint8_t uart_available(void)
+{
+    return (UCSR0A & (1 << RXC0)) ? 1 : 0;
+}
+
 char uart_getc(void)
 {
     while (!(UCSR0A & (1 << RXC0)))

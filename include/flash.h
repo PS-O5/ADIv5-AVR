@@ -45,6 +45,8 @@
 
 /* Reported when FLASH_SR flags an error rather than the transport failing. */
 #define FLASH_ERR    0xFD
+/* Reported when flash reads back as something other than what was written. */
+#define FLASH_VERIFY 0xF6
 /* Reported when FLASH_CR is still locked, which would otherwise fail silently. */
 #define FLASH_LOCKED 0xFC
 
@@ -64,6 +66,7 @@ uint8_t flash_lock(void);
 uint8_t flash_read_sr(uint32_t *sr);
 uint8_t flash_program_word(uint32_t addr, uint32_t value);
 uint8_t flash_write(uint32_t addr, const uint32_t *words, uint16_t count);
+uint8_t flash_verify(uint32_t addr, const uint32_t *words, uint16_t count);
 uint8_t flash_erase_sector(uint8_t sector);
 uint8_t flash_mass_erase(void);
 

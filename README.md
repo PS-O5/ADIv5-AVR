@@ -61,8 +61,10 @@ screen /dev/ttyACM0 115200
 
 It connects on startup and gives a `>` prompt. Addresses and values are hex, with or
 without `0x`. Counts, sizes, register names and slot numbers are decimal. A command is a
-single letter, and anything else is rejected rather than guessed at, so `pc 20000000` is
-an error instead of being read as `p` with an argument of `c`.
+single letter apart from `rtt`, and a token that matches nothing is rejected rather than
+guessed at, so `pc 20000000` is an error instead of being read as `p` with an argument of
+`c`. Single letters ran out at twenty six commands, which is why longer names are matched
+whole rather than by their first character.
 
 **Connection and identity**
 
@@ -87,6 +89,7 @@ an error instead of being read as `p` with an argument of `c`.
 | `h` | halt |
 | `g` | resume |
 | `t` | reset and halt, catching the core at the vector fetch |
+| `q` | reset and run, letting the target boot its own firmware |
 | `n [count]` | step one instruction, or count of them |
 | `m [count]` | step with interrupts masked |
 | `x` | show all core registers, halted only |
@@ -121,6 +124,7 @@ an error instead of being read as `p` with an argument of `c`.
 |---|---|
 | `l <addr>` | receive a binary over XMODEM and program it |
 | `y <addr> <len>` | send memory over XMODEM to a file |
+| `rtt [base] [len]` | stream RTT output from the target |
 
 ### A worked session
 
@@ -263,13 +267,21 @@ block at a time. XMODEM rather than something custom, so ordinary tools can send
 with no host script. The target is halted first, and sticky errors are cleared afterwards
 so a programming fault does not leave the link dead.
 
-Unlock and erase before loading. A locked controller ignores the erase silently.
+Unlock first. Sectors are erased as the transfer reaches them, and every block is read
+back and compared before the next is accepted.
 
 ```
 > u
-> e 0
 > l 08000000
 ```
+
+Erasing happens on entering a sector rather than up front, because XMODEM does not say how
+long the file is until it ends. The stream only moves forwards, so a sector being entered
+has not been written to yet. Note this erases whole sectors, so a load starting partway
+into one still discards what came before it in that sector.
+
+Verifying matters more than it sounds. Without it a load can report success while the flash
+holds something else, and the only way to find out is to read it back and compare by hand.
 
 Then send the file. In minicom that is `Ctrl-A S`, pick xmodem, space to mark the file,
 enter to send. The receiver NAKs once a second for a minute waiting for the sender, so
@@ -283,6 +295,31 @@ Verify with a dump:
 0x08000000: B0000000 B0000001 B0000002 B0000003
 0x08000010: B0000004 B0000005 B0000006 B0000007
 ```
+
+### RTT
+
+RTT is SEGGER's trick for getting `printf` off a target without a spare pin: the firmware
+leaves a control block in RAM holding ring buffers, and the host reads them over the debug
+link like any other memory. Everything it needs is already here, so this costs no extra
+wire and no target stub beyond the library the firmware already links.
+
+The control block starts with `"SEGGER RTT"` padded to sixteen bytes, then the buffer
+counts, then descriptors of name, pointer, size, write offset and read offset. `rtt` scans
+RAM for that ID, then polls the first up buffer, printing whatever appears until a key is
+pressed.
+
+```
+> rtt
+searching RAM for the control block
+control block at 0x20001000, 1 up buffers
+press a key to stop
+Hello from RTT!
+```
+
+The host owns the read offset and writes it back after draining, which is how the target
+knows the space is free again. Skip that and the buffer fills and stalls. The scan defaults
+to the 128KB of SRAM at `0x20000000` and takes a couple of seconds; passing a base and
+length narrows it.
 
 ### Reading memory back out
 
@@ -312,6 +349,7 @@ costs about one transaction per word instead of three.
 | `src/cortex.c` | ARMv7-M debug. Halt, resume, reset-halt, stepping and core registers through DHCSR, DEMCR, AIRCR and DCRSR/DCRDR. |
 | `src/fpb.c` | Hardware breakpoints through the FPB unit, handling both comparator formats. |
 | `src/dwt.c` | Data watchpoints through the DWT unit. |
+| `src/rtt.c` | Finds the SEGGER RTT control block in target RAM and drains its ring buffers. |
 | `src/flash.c` | STM32F4 flash controller. Unlock, word programming, sector erase. |
 | `src/shell.c` | The UART command shell. String literals live in `PROGMEM` so they cost flash rather than the 2KB of SRAM. |
 | `src/xmodem.c` | XMODEM receive, programming each block into flash as it arrives. |
@@ -616,16 +654,29 @@ The second write starts at `0x080003F0` deliberately, so it straddles the 1KB bo
 where TAR auto-increment stops being guaranteed.
 
 Working: connect, power up, read and write memory at byte, halfword and word size, halt,
-resume, reset-halt, single stepping, core registers, hardware breakpoints, data
-watchpoints, flash erase and programming, loading a binary over serial, and reading memory
-back out to a file.
+resume, reset-halt, reset-run, single stepping, core registers, hardware breakpoints, data
+watchpoints, flash probing, sector and mass erase, programming with verification, option
+bytes and readout protection, loading a binary over serial, reading memory back to a file,
+and streaming RTT output.
 
 A round trip through the shell, programming a small routine into flash, breaking on it,
 and reading it back, verifies byte for byte against the image that went in.
 
-Footprint: about 16KB of the 32KB flash, and 245 bytes of the 2KB of SRAM. Keeping string
-literals in `PROGMEM` matters more than it sounds: before that change `.data` alone was
-1396 bytes, leaving barely enough stack for the 128 byte XMODEM buffer.
+### Footprint
+
+```
+Program:  18390 bytes (56.1% of 32KB flash)
+Data:       256 bytes (12.5% of 2KB SRAM)
+```
+
+The Uno's bootloader occupies the top of flash, so the usable figure is a little under
+32KB. Against that, roughly half the flash and an eighth of the RAM is spent.
+
+RAM was the tighter of the two until string literals moved into `PROGMEM`. Before that
+`.data` alone was 1396 bytes, which left barely enough stack for XMODEM's 128 byte block
+buffer, and every new message made it worse. Afterwards `.data` is 94 bytes and the cost
+moved to flash, which there is far more of. On a part with this ratio of flash to RAM,
+that trade is almost always the right one.
 
 ## References
 
