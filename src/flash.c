@@ -1,25 +1,106 @@
+#include <util/delay.h>
 #include "swd.h"
 #include "ap.h"
 #include "flash.h"
 
-#define BSY_RETRIES 200
+/*
+ * Real time, not poll counts. A retry count is a proxy for time that silently
+ * changes meaning with the SWD clock, and erases take hundreds of milliseconds:
+ * 250 to 400ms for a 16KB sector, longer for a 128KB one.
+ */
+#define BSY_PROGRAM_MS  200
+#define BSY_ERASE_MS   8000
+
+static uint16_t size_kb;
+static uint8_t sectors;
+
+/*
+ * STM32F4 sectors are not uniform: four of 16KB, one of 64KB, then 128KB for
+ * the rest. The part reports its own flash size, so the map can be derived
+ * instead of hardcoding one device.
+ */
+uint8_t flash_probe(void)
+{
+    uint16_t kb = 0;
+    uint8_t ack = mem_ap_read16(FLASH_SIZE_REG, &kb);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    size_kb = kb;
+
+    if (kb <= 64)
+        sectors = (uint8_t)(kb / 16);
+    else if (kb <= 128)
+        sectors = 5;
+    else
+        sectors = (uint8_t)(5 + (kb - 128) / 128);
+
+    return SWD_ACK_OK;
+}
+
+uint16_t flash_size_kb(void)
+{
+    return size_kb;
+}
+
+uint8_t flash_sectors(void)
+{
+    return sectors;
+}
+
+uint32_t flash_sector_size(uint8_t sector)
+{
+    if (sector < 4)
+        return 16UL * 1024;
+    if (sector == 4)
+        return 64UL * 1024;
+    return 128UL * 1024;
+}
+
+uint32_t flash_sector_base(uint8_t sector)
+{
+    if (sector < 4)
+        return FLASH_BASE_ADDR + 16UL * 1024 * sector;
+    if (sector == 4)
+        return FLASH_BASE_ADDR + 64UL * 1024;
+    return FLASH_BASE_ADDR + 128UL * 1024 * (sector - 4);
+}
+
+uint8_t flash_sector_of(uint32_t addr, uint8_t *sector)
+{
+    for (uint8_t i = 0; i < sectors; i++) {
+        uint32_t base = flash_sector_base(i);
+        if (addr >= base && addr < base + flash_sector_size(i)) {
+            *sector = i;
+            return SWD_ACK_OK;
+        }
+    }
+
+    return FLASH_ERR;
+}
 
 uint8_t flash_read_sr(uint32_t *sr)
 {
     return mem_ap_read_word(FLASH_SR, sr);
 }
 
-static uint8_t flash_wait_busy(uint32_t *sr)
+static uint8_t flash_wait_busy_ms(uint32_t *sr, uint16_t timeout_ms)
 {
-    for (uint16_t i = 0; i < BSY_RETRIES; i++) {
+    for (uint16_t ms = 0; ms <= timeout_ms; ms++) {
         uint8_t ack = flash_read_sr(sr);
         if (ack != SWD_ACK_OK)
             return ack;
         if (!(*sr & FLASH_SR_BSY))
             return SWD_ACK_OK;
+        _delay_ms(1);
     }
 
     return SWD_TIMEOUT;
+}
+
+static uint8_t flash_wait_busy(uint32_t *sr)
+{
+    return flash_wait_busy_ms(sr, BSY_PROGRAM_MS);
 }
 
 /* Clears the sticky status flags, which are write-1-to-clear. */
@@ -62,10 +143,10 @@ uint8_t flash_lock(void)
 }
 
 /* Drops PG/SER and reports whatever went wrong first. */
-static uint8_t flash_finish(uint8_t ack, uint32_t sr)
+static uint8_t flash_finish_ms(uint8_t ack, uint32_t sr, uint16_t timeout_ms)
 {
     uint32_t final_sr = sr;
-    uint8_t wait_ack = flash_wait_busy(&final_sr);
+    uint8_t wait_ack = flash_wait_busy_ms(&final_sr, timeout_ms);
     uint8_t cr_ack = mem_ap_write_word(FLASH_CR, 0);
 
     if (ack != SWD_ACK_OK)
@@ -76,6 +157,11 @@ static uint8_t flash_finish(uint8_t ack, uint32_t sr)
         return cr_ack;
 
     return (final_sr & FLASH_SR_ERRORS) ? FLASH_ERR : SWD_ACK_OK;
+}
+
+static uint8_t flash_finish(uint8_t ack, uint32_t sr)
+{
+    return flash_finish_ms(ack, sr, BSY_PROGRAM_MS);
 }
 
 uint8_t flash_program_word(uint32_t addr, uint32_t value)
@@ -142,6 +228,9 @@ uint8_t flash_write(uint32_t addr, const uint32_t *words, uint16_t count)
 
 uint8_t flash_erase_sector(uint8_t sector)
 {
+    if (sectors && sector >= sectors)
+        return FLASH_ERR;
+
     uint32_t sr = 0;
     uint8_t ack = flash_wait_busy(&sr);
     if (ack != SWD_ACK_OK)
@@ -164,5 +253,5 @@ uint8_t flash_erase_sector(uint8_t sector)
 
     ack = mem_ap_write_word(FLASH_CR, cr | FLASH_CR_STRT);
 
-    return flash_finish(ack, sr);
+    return flash_finish_ms(ack, sr, BSY_ERASE_MS);
 }

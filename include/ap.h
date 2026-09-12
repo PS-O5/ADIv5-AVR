@@ -8,8 +8,13 @@
 #define AP_DRW 0x0C
 #define AP_IDR 0x0C
 
+#define CSW_SIZE_BYTE      0x0
+#define CSW_SIZE_HALF      0x1
 #define CSW_SIZE_WORD      0x2
 #define CSW_ADDRINC_SINGLE (0x1 << 4)
+
+/* Returned when the MEM-AP does not implement the requested access size. */
+#define MEM_AP_BAD_SIZE 0xF8
 
 /*
  * CSW Prot bits [30:24] are IMPLEMENTATION DEFINED in ADIv5. For a Cortex-M
@@ -31,5 +36,10 @@ uint8_t mem_ap_init(void);
 uint8_t mem_ap_read_word(uint32_t addr, uint32_t *value);
 uint8_t mem_ap_write_word(uint32_t addr, uint32_t value);
 uint8_t mem_ap_read_block(uint32_t addr, uint32_t *out, uint16_t count);
+
+uint8_t mem_ap_read8(uint32_t addr, uint8_t *value);
+uint8_t mem_ap_write8(uint32_t addr, uint8_t value);
+uint8_t mem_ap_read16(uint32_t addr, uint16_t *value);
+uint8_t mem_ap_write16(uint32_t addr, uint16_t value);
 
 #endif

@@ -14,15 +14,16 @@
 static const char help_text[] PROGMEM =
     "c              connect\r\n"
     "i              ids: DPIDR, AP IDR, CPUID, DBGMCU\r\n"
-    "r <addr>       read word\r\n"
+    "r <addr> [sz]  read, sz 1 2 or 4 (default 4)\r\n"
     "d <addr> [n]   dump n words (default 8)\r\n"
-    "w <addr> <val> write word\r\n"
+    "w <a> <v> [sz] write, sz 1 2 or 4 (default 4)\r\n"
     "h              halt\r\n"
     "g              resume\r\n"
     "t              reset and halt\r\n"
     "s              status (DHCSR)\r\n"
     "u              unlock flash\r\n"
-    "e <sector>     erase flash sector\r\n"
+    "f              flash size and sector map\r\n"
+    "e <sect|addr>  erase sector, or the one holding addr\r\n"
     "p <addr> <val> program flash word\r\n"
     "l <addr>       load binary via xmodem\r\n"
     "y <addr> <len> save memory via xmodem\r\n"
@@ -92,10 +93,13 @@ static uint8_t parse_hex(const char **p, uint32_t *out)
         digits++;
     }
 
-    *out = value;
-
     /* More than eight digits silently means a different address than intended. */
-    return digits != 0 && digits <= 8;
+    if (digits == 0 || digits > 8)
+        return 0;
+
+    /* Only on success, so a caller's default survives a missing argument. */
+    *out = value;
+    return 1;
 }
 
 static uint8_t parse_dec(const char **p, uint32_t *out)
@@ -112,8 +116,11 @@ static uint8_t parse_dec(const char **p, uint32_t *out)
         digits++;
     }
 
+    if (digits == 0)
+        return 0;
+
     *out = value;
-    return digits != 0;
+    return 1;
 }
 
 /* Names or decimal numbers. Hex here would read "15" as 21 and pick the wrong one. */
@@ -191,8 +198,10 @@ static void cmd_connect(void)
     dp_clear_errors();
 
     ack = mem_ap_init();
-    if (ack == SWD_ACK_OK)
+    if (ack == SWD_ACK_OK) {
         fpb_init();
+        flash_probe();
+    }
 
     report(ack);
 }
@@ -354,6 +363,62 @@ static void cmd_step(uint32_t count, uint8_t mask_interrupts)
     }
 
     show_pc();
+}
+
+static void cmd_flash_info(void)
+{
+    if (flash_probe() != SWD_ACK_OK) {
+        uart_puts("cannot read the flash size register\r\n");
+        return;
+    }
+
+    uart_print_dec(flash_size_kb());
+    uart_puts("KB, ");
+    uart_print_dec(flash_sectors());
+    uart_puts(" sectors\r\n");
+
+    for (uint8_t i = 0; i < flash_sectors(); i++) {
+        uart_puts("  ");
+        uart_print_dec(i);
+        uart_puts("  ");
+        put_hex32(flash_sector_base(i));
+        uart_puts("  ");
+        uart_print_dec(flash_sector_size(i) / 1024);
+        uart_puts("KB\r\n");
+    }
+}
+
+/* A flash address erases the sector holding it, anything else is a sector number. */
+static void cmd_erase(uint32_t arg)
+{
+    uint8_t sector = (uint8_t)arg;
+
+    if (arg >= FLASH_BASE_ADDR) {
+        if (flash_sector_of(arg, &sector) != SWD_ACK_OK) {
+            uart_puts("address is not in flash\r\n");
+            return;
+        }
+        uart_puts("sector ");
+        uart_print_dec(sector);
+        uart_puts(" ");
+    }
+
+    /* Do not erase underneath a core that may be fetching from flash. */
+    cortex_halt();
+
+    uint8_t ack = flash_erase_sector(sector);
+    report(ack);
+
+    if (ack != SWD_ACK_OK) {
+        uint32_t sr = 0, cr = 0;
+        mem_ap_read_word(FLASH_SR, &sr);
+        mem_ap_read_word(FLASH_CR, &cr);
+        uart_puts("  FLASH_SR ");
+        put_hex32(sr);
+        uart_puts("  FLASH_CR ");
+        put_hex32(cr);
+        nl();
+    }
 }
 
 static void cmd_save(uint32_t addr, uint32_t length)
@@ -539,17 +604,43 @@ static void dispatch(const char *line)
             uart_puts("need an address\r\n");
             break;
         }
+        if (!parse_dec(&line, &b))
+            b = 4;
         {
             uint32_t v = 0;
-            uint8_t ack = mem_ap_read_word(a, &v);
-            if (ack == SWD_ACK_OK) {
-                put_hex32(a);
-                uart_puts(": ");
-                put_hex32(v);
-                nl();
+            uint8_t ack;
+            uint8_t v8 = 0;
+            uint16_t v16 = 0;
+
+            if (b == 1) {
+                ack = mem_ap_read8(a, &v8);
+                v = v8;
+            } else if (b == 2) {
+                ack = mem_ap_read16(a, &v16);
+                v = v16;
+            } else if (b == 4) {
+                ack = mem_ap_read_word(a, &v);
             } else {
-                report(ack);
+                uart_puts("size must be 1, 2 or 4\r\n");
+                break;
             }
+
+            if (ack != SWD_ACK_OK) {
+                report(ack);
+                break;
+            }
+
+            put_hex32(a);
+            uart_puts(": ");
+            if (b == 1) {
+                uart_print_hex8((uint8_t)v);
+            } else if (b == 2) {
+                uart_print_hex8((uint8_t)(v >> 8));
+                uart_print_hex8((uint8_t)v);
+            } else {
+                uart_print_hex32(v);
+            }
+            nl();
         }
         break;
 
@@ -568,7 +659,19 @@ static void dispatch(const char *line)
             uart_puts("need an address and a value\r\n");
             break;
         }
-        report(mem_ap_write_word(a, b));
+        {
+            uint32_t size = 4;
+            parse_dec(&line, &size);
+
+            if (size == 1)
+                report(mem_ap_write8(a, (uint8_t)b));
+            else if (size == 2)
+                report(mem_ap_write16(a, (uint16_t)b));
+            else if (size == 4)
+                report(mem_ap_write_word(a, b));
+            else
+                uart_puts("size must be 1, 2 or 4\r\n");
+        }
         break;
 
     case 'h':
@@ -591,12 +694,16 @@ static void dispatch(const char *line)
         report(flash_unlock());
         break;
 
+    case 'f':
+        cmd_flash_info();
+        break;
+
     case 'e':
         if (!parse_hex(&line, &a)) {
-            uart_puts("need a sector number\r\n");
+            uart_puts("need a sector number or a flash address\r\n");
             break;
         }
-        report(flash_erase_sector((uint8_t)a));
+        cmd_erase(a);
         break;
 
     case 'p':

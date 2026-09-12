@@ -34,6 +34,17 @@
 /* Reported when FLASH_CR is still locked, which would otherwise fail silently. */
 #define FLASH_LOCKED 0xFC
 
+#define FLASH_BASE_ADDR 0x08000000UL
+#define FLASH_SIZE_REG  0x1FFF7A22UL
+
+/* Reads the size register and derives the sector map. Call after connecting. */
+uint8_t flash_probe(void);
+uint16_t flash_size_kb(void);
+uint8_t flash_sectors(void);
+uint32_t flash_sector_base(uint8_t sector);
+uint32_t flash_sector_size(uint8_t sector);
+uint8_t flash_sector_of(uint32_t addr, uint8_t *sector);
+
 uint8_t flash_unlock(void);
 uint8_t flash_lock(void);
 uint8_t flash_read_sr(uint32_t *sr);

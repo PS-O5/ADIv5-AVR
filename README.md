@@ -65,14 +65,15 @@ It connects on startup and gives a `>` prompt. Numbers are hex, with or without 
 |---------|------|
 | `c` | connect: line reset, switch sequence, power up, MEM-AP setup |
 | `i` | DPIDR, AP IDR, CPUID, DBGMCU |
-| `r <addr>` | read one word |
+| `r <addr> [sz]` | read, size 1, 2 or 4 bytes, default 4 |
 | `d <addr> [n]` | dump n words, four per line, default 8 |
-| `w <addr> <val>` | write one word |
+| `w <addr> <val> [sz]` | write, size 1, 2 or 4 bytes, default 4 |
+| `f` | flash size and sector map |
 | `h` / `g` | halt / resume |
 | `t` | reset and halt |
 | `s` | DHCSR, with halted and lockup decoded |
 | `u` | unlock flash |
-| `e <sector>` | erase a flash sector |
+| `e <sector\|addr>` | erase a sector, by number or by an address inside it |
 | `p <addr> <val>` | program one flash word |
 | `l <addr>` | load a binary over XMODEM |
 | `y <addr> <len>` | save memory to a file over XMODEM |
@@ -266,6 +267,13 @@ sees a new packet.
 every `ap_read()` follows up with a read of the DP RDBUFF register to collect the value it
 actually asked for.
 
+**Sub-word accesses ride in byte lanes.** The CSW Size field selects byte, halfword or
+word, and for anything narrower than a word the data sits in the DRW lane matching the
+address rather than at the bottom of the register. A byte at `...03` arrives in bits
+[31:24]. Ignore that and every byte read returns the one at offset 0. Size is also allowed
+to be read-only, so the driver reads CSW back after changing it rather than assuming the
+write took.
+
 **CSW needs its Prot bits set.** Size and auto-increment alone are not enough. Bits
 [30:24] are IMPLEMENTATION DEFINED in ADIv5, so the spec cannot tell you what to put
 there. For a Cortex-M AHB-AP they carry MasterType=Debug (bit 29) and HPROT[1]=privileged
@@ -347,8 +355,42 @@ controller intercepts the bus write. Poll BSY (FLASH_SR bit 16) afterwards and c
 error flags.
 
 Flash only changes bits from 1 to 0, so a word has to be erased before it is written.
-Programming a non-erased word sets PGSERR. Sectors on the F411 are not uniform: four of
-16KB, one of 64KB, then three of 128KB.
+Programming a non-erased word sets PGSERR.
+
+Halt the core first. An erase blocks access to the flash, and starting one underneath a
+core that is fetching instructions from that same flash leaves BSY set and the operation
+never finishes. The same commands work fine against a locked-up or halted core, which
+makes this an easy one to miss.
+
+### Sector map
+
+Sectors are not uniform: four of 16KB, one of 64KB, then 128KB for the rest. Rather than
+hardcoding one part, the size is read from the chip at `0x1FFF7A22` and the map derived
+from it, so `f` reports the real geometry:
+
+```
+> f
+512KB, 8 sectors
+  0  0x08000000  16KB
+  1  0x08004000  16KB
+  2  0x08008000  16KB
+  3  0x0800C000  16KB
+  4  0x08010000  64KB
+  5  0x08020000  128KB
+  6  0x08040000  128KB
+  7  0x08060000  128KB
+```
+
+`e` takes either a sector number or an address, resolving an address to the sector holding
+it, and rejects both out-of-range sectors and addresses outside flash.
+
+### Timeouts belong in milliseconds
+
+Flash timeouts were originally poll counts, which really means "however long N SWD
+transactions take". Raising the SWD clock from 5kHz to full speed shortened every flash
+timeout by about a hundred times without touching a line of flash code, and sector erases,
+which need 250 to 400ms for 16KB, started reporting failure after roughly 50ms. They are
+now expressed in milliseconds and are independent of link speed.
 
 One detail that looks like a bug and is not: EOP (FLASH_SR bit 0) stays clear after a
 successful operation, because it is only set when EOPIE is enabled. Success is the absence
