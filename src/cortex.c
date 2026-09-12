@@ -66,6 +66,42 @@ uint8_t cortex_write_reg(uint8_t reg, uint32_t value)
     return wait_regrdy();
 }
 
+#define STEP_RETRIES 64
+
+/*
+ * C_HALT has to be clear for the step to happen: the core leaves debug state,
+ * retires one instruction, and halts again. Masking interrupts keeps a pending
+ * exception from stealing the step and landing in a handler instead.
+ */
+uint8_t cortex_step(uint8_t mask_interrupts)
+{
+    uint32_t dhcsr = 0;
+    uint8_t ack = cortex_read_dhcsr(&dhcsr);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    if (!(dhcsr & DHCSR_S_HALT))
+        return CORTEX_NOT_HALTED;
+
+    uint32_t cmd = DHCSR_DBGKEY | DHCSR_C_DEBUGEN | DHCSR_C_STEP;
+    if (mask_interrupts)
+        cmd |= DHCSR_C_MASKINTS;
+
+    ack = mem_ap_write_word(DHCSR, cmd);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    for (uint8_t i = 0; i < STEP_RETRIES; i++) {
+        ack = cortex_read_dhcsr(&dhcsr);
+        if (ack != SWD_ACK_OK)
+            return ack;
+        if (dhcsr & DHCSR_S_HALT)
+            return SWD_ACK_OK;
+    }
+
+    return SWD_TIMEOUT;
+}
+
 #define HALT_RETRIES 64
 
 uint8_t cortex_reset_halt(void)

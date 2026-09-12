@@ -23,5 +23,6 @@ typedef struct {
 extern xmodem_stats xm_stats;
 
 uint8_t xmodem_receive_to_flash(uint32_t addr, uint32_t *bytes_written);
+uint8_t xmodem_send_memory(uint32_t addr, uint32_t length, uint32_t *bytes_sent);
 
 #endif

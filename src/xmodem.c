@@ -1,4 +1,5 @@
 #include "swd.h"
+#include "ap.h"
 #include "flash.h"
 #include "uart.h"
 #include "xmodem.h"
@@ -126,6 +127,106 @@ uint8_t xmodem_receive_to_flash(uint32_t addr, uint32_t *bytes_written)
                     return XMODEM_TIMEOUT;
             }
         }
+    }
+
+    return XMODEM_TIMEOUT;
+}
+
+/* XMODEM CRC16: poly 0x1021, zero seed, no final xor. */
+static uint16_t crc16(const uint8_t *d, uint16_t n)
+{
+    uint16_t crc = 0;
+
+    while (n--) {
+        crc ^= (uint16_t)*d++ << 8;
+        for (uint8_t i = 0; i < 8; i++)
+            crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
+    }
+
+    return crc;
+}
+
+#define SEND_RETRIES 8
+
+uint8_t xmodem_send_memory(uint32_t addr, uint32_t length, uint32_t *bytes_sent)
+{
+    uint8_t data[BLOCK];
+    uint8_t use_crc = 0;
+    uint8_t started = 0;
+
+    *bytes_sent = 0;
+
+    /* The receiver opens: C asks for CRC, NAK for the plain checksum. */
+    for (uint8_t i = 0; i < START_RETRIES && !started; i++) {
+        int16_t c = uart_getc_timeout(BLOCK_TIMEOUT_MS);
+
+        if (c == 'C') {
+            use_crc = 1;
+            started = 1;
+        } else if (c == NAK) {
+            use_crc = 0;
+            started = 1;
+        } else if (c == CAN) {
+            return XMODEM_CANCELED;
+        }
+    }
+
+    if (!started)
+        return XMODEM_TIMEOUT;
+
+    uint8_t blk = 1;
+    uint32_t offset = 0;
+
+    while (offset < length) {
+        uint16_t chunk = (length - offset > BLOCK) ? BLOCK : (uint16_t)(length - offset);
+
+        if (mem_ap_read_block(addr + offset, words, (uint16_t)((chunk + 3) / 4)) != SWD_ACK_OK)
+            return XMODEM_FLASHERR;
+
+        for (uint16_t i = 0; i < BLOCK; i++)
+            data[i] = (i < chunk) ? (uint8_t)(words[i / 4] >> (8 * (i & 3))) : 0x1A;
+
+        uint8_t acked = 0;
+
+        for (uint8_t try = 0; try < SEND_RETRIES && !acked; try++) {
+            uart_putc(SOH);
+            uart_putc(blk);
+            uart_putc((uint8_t)(255 - blk));
+
+            for (uint16_t i = 0; i < BLOCK; i++)
+                uart_putc((char)data[i]);
+
+            if (use_crc) {
+                uint16_t crc = crc16(data, BLOCK);
+                uart_putc((char)(crc >> 8));
+                uart_putc((char)(crc & 0xFF));
+            } else {
+                uint8_t sum = 0;
+                for (uint16_t i = 0; i < BLOCK; i++)
+                    sum += data[i];
+                uart_putc((char)sum);
+            }
+
+            int16_t r = uart_getc_timeout(BLOCK_TIMEOUT_MS * 2);
+            if (r == ACK)
+                acked = 1;
+            else if (r == CAN)
+                return XMODEM_CANCELED;
+        }
+
+        if (!acked)
+            return XMODEM_TIMEOUT;
+
+        blk++;
+        offset += chunk;
+        *bytes_sent += chunk;
+    }
+
+    for (uint8_t i = 0; i < SEND_RETRIES; i++) {
+        uart_putc(EOT);
+        int16_t r = uart_getc_timeout(BLOCK_TIMEOUT_MS);
+        if (r == ACK)
+            return XMODEM_OK;
     }
 
     return XMODEM_TIMEOUT;

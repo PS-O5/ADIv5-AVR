@@ -25,7 +25,11 @@ uint8_t ap_write(uint8_t addr, uint32_t data);
 
 uint8_t mem_ap_init(void);
 
+/* TAR auto-increment is only guaranteed across the bottom 10 address bits. */
+#define TAR_BOUNDARY 1024UL
+
 uint8_t mem_ap_read_word(uint32_t addr, uint32_t *value);
 uint8_t mem_ap_write_word(uint32_t addr, uint32_t value);
+uint8_t mem_ap_read_block(uint32_t addr, uint32_t *out, uint16_t count);
 
 #endif

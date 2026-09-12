@@ -4,6 +4,7 @@
 #include "ap.h"
 #include "cortex.h"
 #include "flash.h"
+#include "fpb.h"
 #include "uart.h"
 #include "xmodem.h"
 #include "shell.h"
@@ -24,8 +25,14 @@ static const char help_text[] PROGMEM =
     "e <sector>     erase flash sector\r\n"
     "p <addr> <val> program flash word\r\n"
     "l <addr>       load binary via xmodem\r\n"
+    "y <addr> <len> save memory via xmodem\r\n"
     "x              core registers (halted only)\r\n"
-    "x <n> <val>    write core register n\r\n"
+    "x <reg> <val>  write reg: r0-r12, sp, lr, pc, psr\r\n"
+    "n [count]      step one instruction\r\n"
+    "m [count]      step with interrupts masked\r\n"
+    "b              list breakpoints\r\n"
+    "b <addr>       set hardware breakpoint\r\n"
+    "k [slot]       clear one breakpoint, or all\r\n"
     "?              this help\r\n";
 
 static void puts_P(const char *s)
@@ -86,7 +93,58 @@ static uint8_t parse_hex(const char **p, uint32_t *out)
     }
 
     *out = value;
+
+    /* More than eight digits silently means a different address than intended. */
+    return digits != 0 && digits <= 8;
+}
+
+static uint8_t parse_dec(const char **p, uint32_t *out)
+{
+    while (**p == ' ')
+        (*p)++;
+
+    uint32_t value = 0;
+    uint8_t digits = 0;
+
+    while (**p >= '0' && **p <= '9') {
+        value = value * 10 + (uint32_t)(**p - '0');
+        (*p)++;
+        digits++;
+    }
+
+    *out = value;
     return digits != 0;
+}
+
+/* Names or decimal numbers. Hex here would read "15" as 21 and pick the wrong one. */
+static uint8_t parse_reg(const char **p, uint8_t *reg)
+{
+    while (**p == ' ')
+        (*p)++;
+
+    const char *s = *p;
+
+    if (s[0] == 's' && s[1] == 'p') { *p += 2; *reg = REG_SP;   return 1; }
+    if (s[0] == 'l' && s[1] == 'r') { *p += 2; *reg = REG_LR;   return 1; }
+    if (s[0] == 'p' && s[1] == 'c') { *p += 2; *reg = REG_PC;   return 1; }
+    if (s[0] == 'p' && s[1] == 's' && s[2] == 'r') { *p += 3; *reg = REG_XPSR; return 1; }
+
+    uint32_t n = 0;
+
+    if (s[0] == 'r' && s[1] >= '0' && s[1] <= '9') {
+        (*p)++;
+        if (!parse_dec(p, &n) || n > 12)
+            return 0;
+        *reg = (uint8_t)n;
+        return 1;
+    }
+
+    if (parse_dec(p, &n) && n <= REG_LAST) {
+        *reg = (uint8_t)n;
+        return 1;
+    }
+
+    return 0;
 }
 
 static void read_line(char *buf)
@@ -131,7 +189,12 @@ static void cmd_connect(void)
 
     dp_power_up();
     dp_clear_errors();
-    report(mem_ap_init());
+
+    ack = mem_ap_init();
+    if (ack == SWD_ACK_OK)
+        fpb_init();
+
+    report(ack);
 }
 
 static void cmd_ids(void)
@@ -254,6 +317,126 @@ static void cmd_regs(void)
     nl();
 }
 
+static void show_pc(void)
+{
+    uint32_t pc = 0, psr = 0;
+
+    if (cortex_read_reg(REG_PC, &pc) != SWD_ACK_OK) {
+        uart_puts("pc unreadable\r\n");
+        return;
+    }
+    cortex_read_reg(REG_XPSR, &psr);
+
+    uart_puts("pc ");
+    uart_print_hex32(pc);
+    uart_puts("  psr ");
+    uart_print_hex32(psr);
+    uart_puts("  exc ");
+    uart_print_dec(psr & 0x1FF);
+    nl();
+}
+
+static void cmd_step(uint32_t count, uint8_t mask_interrupts)
+{
+    if (count == 0)
+        count = 1;
+
+    for (uint32_t i = 0; i < count; i++) {
+        uint8_t ack = cortex_step(mask_interrupts);
+        if (ack == CORTEX_NOT_HALTED) {
+            uart_puts("core is running, halt first\r\n");
+            return;
+        }
+        if (ack != SWD_ACK_OK) {
+            report(ack);
+            return;
+        }
+    }
+
+    show_pc();
+}
+
+static void cmd_save(uint32_t addr, uint32_t length)
+{
+    uart_puts("start the receiver now\r\n");
+
+    uint32_t sent = 0;
+    uint8_t result = xmodem_send_memory(addr, length, &sent);
+
+    nl();
+    uart_print_dec(sent);
+    uart_puts(" bytes from ");
+    put_hex32(addr);
+    uart_puts(": ");
+
+    switch (result) {
+    case XMODEM_OK:       uart_puts("ok");              break;
+    case XMODEM_TIMEOUT:  uart_puts("timed out");       break;
+    case XMODEM_CANCELED: uart_puts("canceled");        break;
+    default:              uart_puts("target read failed"); break;
+    }
+    nl();
+}
+
+static void cmd_break_list(void)
+{
+    uart_puts("fpb rev ");
+    uart_print_dec(fpb_revision());
+    uart_puts(", ");
+    uart_print_dec(fpb_slots());
+    uart_puts(" slots\r\n");
+
+    for (uint8_t i = 0; i < fpb_slots(); i++) {
+        uint32_t comp = 0, addr = 0;
+        uint8_t enabled = 0;
+
+        if (fpb_get(i, &comp, &addr, &enabled) != SWD_ACK_OK)
+            continue;
+
+        uart_puts("  ");
+        uart_print_dec(i);
+        uart_puts(enabled ? " enabled  " : " free     ");
+        if (enabled)
+            put_hex32(addr);
+        nl();
+    }
+}
+
+static void cmd_break_set(uint32_t addr)
+{
+    for (uint8_t i = 0; i < fpb_slots(); i++) {
+        uint32_t comp = 0, cur = 0;
+        uint8_t enabled = 0;
+
+        uint8_t ack = fpb_get(i, &comp, &cur, &enabled);
+        if (ack != SWD_ACK_OK) {
+            report(ack);
+            return;
+        }
+        if (enabled)
+            continue;
+
+        ack = fpb_set(i, addr);
+        if (ack == FPB_OUT_OF_RANGE) {
+            uart_puts("this fpb only breaks below 0x20000000\r\n");
+            return;
+        }
+        if (ack != SWD_ACK_OK) {
+            report(ack);
+            return;
+        }
+
+        uart_puts("breakpoint ");
+        uart_print_dec(i);
+        uart_puts(" at ");
+        put_hex32(addr);
+        nl();
+        return;
+    }
+
+    uart_puts("no free slots\r\n");
+}
+
 static void cmd_load(uint32_t addr)
 {
     /* Halt first so the target is not running while its flash changes. */
@@ -329,6 +512,16 @@ static void dispatch(const char *line)
         return;
 
     line++;
+
+    /*
+     * The command is one character. Without this, "pc 20000000" parses as p
+     * with an argument of c, which is a valid hex digit, and programs flash at
+     * address 0xC.
+     */
+    if (*line && *line != ' ') {
+        uart_puts("unknown command, ? for help\r\n");
+        return;
+    }
 
     uint32_t a = 0, b = 0;
 
@@ -414,15 +607,53 @@ static void dispatch(const char *line)
         report(flash_program_word(a, b));
         break;
 
+    case 'y':
+        if (!parse_hex(&line, &a) || !parse_hex(&line, &b)) {
+            uart_puts("need an address and a length\r\n");
+            break;
+        }
+        cmd_save(a, b);
+        break;
+
+    case 'b':
+        if (parse_hex(&line, &a))
+            cmd_break_set(a);
+        else
+            cmd_break_list();
+        break;
+
+    case 'k':
+        if (parse_dec(&line, &a)) {
+            report(fpb_clear((uint8_t)a));
+        } else {
+            for (uint8_t i = 0; i < fpb_slots(); i++)
+                fpb_clear(i);
+            uart_puts("all cleared\r\n");
+        }
+        break;
+
+    case 'n':
+        parse_hex(&line, &a);
+        cmd_step(a, 0);
+        break;
+
+    case 'm':
+        parse_hex(&line, &a);
+        cmd_step(a, 1);
+        break;
+
     case 'x':
-        if (parse_hex(&line, &a)) {
+        {
+            uint8_t reg = 0;
+            if (!parse_reg(&line, &reg)) {
+                cmd_regs();
+                break;
+            }
             if (!parse_hex(&line, &b)) {
                 uart_puts("need a value to write\r\n");
                 break;
             }
-            report(cortex_write_reg((uint8_t)a, b));
-        } else {
-            cmd_regs();
+            report(cortex_write_reg(reg, b));
         }
         break;
 

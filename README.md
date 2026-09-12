@@ -75,8 +75,14 @@ It connects on startup and gives a `>` prompt. Numbers are hex, with or without 
 | `e <sector>` | erase a flash sector |
 | `p <addr> <val>` | program one flash word |
 | `l <addr>` | load a binary over XMODEM |
+| `y <addr> <len>` | save memory to a file over XMODEM |
 | `x` | core registers, halted only |
-| `x <n> <val>` | write core register n |
+| `x <reg> <val>` | write a register: `r0`-`r12`, `sp`, `lr`, `pc`, `psr` |
+| `n [count]` | step one instruction |
+| `m [count]` | step with interrupts masked |
+| `b` | list breakpoints |
+| `b <addr>` | set a hardware breakpoint |
+| `k [slot]` | clear one breakpoint, or all |
 | `?` | help |
 
 ```
@@ -98,6 +104,65 @@ back `0xFA05` in its top half although writes need `0x05FA`, so a read-modify-wr
 accidentally supply the key. And ICSR `0x803` is VECTACTIVE=3, a HardFault, which is what
 a blank chip does: it fetches `0xFFFFFFFF` for both the stack pointer and the reset vector
 and faults immediately.
+
+### Stepping
+
+`C_STEP` in DHCSR runs exactly one instruction. `C_HALT` has to be clear at the same time,
+so the core leaves debug state, retires one instruction and halts again. `m` also sets
+`C_MASKINTS`, which stops a pending exception from stealing the step and landing you in a
+handler instead of the next instruction.
+
+Writing a few instructions into SRAM is an easy way to watch it work. `0xBF00` is `NOP`
+and `0xE7FE` is a branch to itself:
+
+```
+> w 20000000 BF00BF00
+> w 20000004 E7FEBF00
+> x pc 20000000
+> x sp 20001000
+> n
+pc 20000002  psr 01000000  exc 0
+> n
+pc 20000004  psr 01000000  exc 0
+> n
+pc 20000006  psr 01000000  exc 0
+> n
+pc 20000006  psr 01000000  exc 0
+```
+
+The PC advances two bytes per instruction and then stops moving, because the last one
+branches to itself. Set the stack pointer somewhere clear of the code before running
+anything.
+
+### Breakpoints
+
+The FPB unit at `0xE0002000` provides hardware breakpoints, so nothing has to be patched
+into the code and they work in flash. `FP_CTRL` reports the revision in bits [31:28] and
+the comparator count split awkwardly across bits [7:4] and [14:12]. `ENABLE` only takes
+effect if `KEY` is written with it.
+
+Revision matters. Version 1 comparators match a word and pick a halfword with the REPLACE
+field, which limits them to the code region below `0x20000000`. Version 2 takes a plain
+address and covers everything. The driver reads the revision and formats the comparator to
+match, and refuses out-of-range addresses on v1 rather than quietly setting a breakpoint
+that can never fire. The STM32F411 has v1 with six comparators.
+
+Breaking on code in flash, with a vector table and three NOPs programmed at `0x08000000`:
+
+```
+> t
+> b 0800000A
+breakpoint 0 at 0x0800000A
+> g
+ok
+> s
+DHCSR 0x01030003  halted=y lockup=n
+> x
+... pc 0800000A
+```
+
+The core ran from the reset vector, executed the first NOP, and halted before executing
+the instruction at the breakpoint address.
 
 ### Loading a binary
 
@@ -127,6 +192,24 @@ Verify with a dump:
 0x08000010: B0000004 B0000005 B0000006 B0000007
 ```
 
+### Reading memory back out
+
+`y <addr> <len>` sends a region the other way, so an image can be pulled off the target
+into a file and compared against what was meant to be there. In minicom that is `Ctrl-A R`.
+
+```
+> y 08000000 100
+start the receiver now
+256 bytes from 0x08000000: ok
+```
+
+Receivers open with `C` to ask for CRC and fall back to `NAK` for the plain checksum, so
+the sender answers to whichever arrives.
+
+Block reads are pipelined. An AP read is posted, meaning a DRW read returns the previous
+access while starting the next, so priming once and taking the last value from RDBUFF
+costs about one transaction per word instead of three.
+
 ## Code layout
 
 | File | Role |
@@ -134,7 +217,8 @@ Verify with a dump:
 | `src/swd.c` | Physical layer. Clock/data bit-banging, turnaround, line reset, connect sequence, and the generic DP/AP transfer. |
 | `src/dp.c` | Debug Port. Register reads/writes and the debug/system power-up handshake. |
 | `src/ap.c` | Access Port. AP register access and MEM-AP setup. |
-| `src/cortex.c` | ARMv7-M debug. Halt, resume, reset-halt and core register access through DHCSR, DEMCR, AIRCR and DCRSR/DCRDR. |
+| `src/cortex.c` | ARMv7-M debug. Halt, resume, reset-halt, stepping and core registers through DHCSR, DEMCR, AIRCR and DCRSR/DCRDR. |
+| `src/fpb.c` | Hardware breakpoints through the FPB unit, handling both comparator formats. |
 | `src/flash.c` | STM32F4 flash controller. Unlock, word programming, sector erase. |
 | `src/shell.c` | The UART command shell. Help text lives in `PROGMEM` so it costs flash rather than the 2KB of SRAM. |
 | `src/xmodem.c` | XMODEM receive, programming each block into flash as it arrives. |
@@ -373,12 +457,16 @@ across 1KB  ack=0x01 256 bytes in 57 ms  verify OK
 The second write starts at `0x080003F0` deliberately, so it straddles the 1KB boundary
 where TAR auto-increment stops being guaranteed.
 
-Everything the original goal called for works: connect, power up, read and write memory,
-halt, reset-halt, read and write core registers, erase and program flash, and load a
-binary over serial.
+Working: connect, power up, read and write memory, halt, resume, reset-halt, single
+stepping, core registers, hardware breakpoints, flash erase and programming, loading a
+binary over serial, and reading memory back out to a file.
 
-Possible next steps: single stepping through DHCSR's C_STEP, breakpoints through the FPB,
-and reading flash back out to verify an image without a second tool.
+A round trip through the shell, programming a small routine into flash, breaking on it,
+and reading it back, verifies byte for byte against the image that went in.
+
+Possible next steps: data watchpoints through the DWT, byte and halfword access through
+the CSW Size field, and using the device ID to pick the flash geometry rather than
+assuming it.
 
 ## References
 
