@@ -51,11 +51,50 @@ make flash      # flash via avrdude (set PORT in the Makefile)
 
 Requires `avr-gcc`, `avr-libc` and `avrdude`. No Arduino core, no framework.
 
-Diagnostics come out over UART at 115200 baud:
+The firmware presents a shell over UART at 115200 baud:
 
 ```
 screen /dev/ttyACM0 115200
 ```
+
+## Shell
+
+It connects on startup and gives a `>` prompt. Numbers are hex, with or without `0x`.
+
+| Command | Does |
+|---------|------|
+| `c` | connect: line reset, switch sequence, power up, MEM-AP setup |
+| `i` | DPIDR, AP IDR, CPUID, DBGMCU |
+| `r <addr>` | read one word |
+| `d <addr> [n]` | dump n words, four per line, default 8 |
+| `w <addr> <val>` | write one word |
+| `h` / `g` | halt / resume |
+| `t` | reset and halt |
+| `s` | DHCSR, with halted and lockup decoded |
+| `u` | unlock flash |
+| `e <sector>` | erase a flash sector |
+| `p <addr> <val>` | program one flash word |
+| `?` | help |
+
+```
+> i
+DPIDR  0x2BA01477
+AP IDR 0x24770011
+CPUID  0x410FC241
+DBGMCU 0x10006431
+> d E000ED00 4
+0xE000ED00: 410FC241 00000803 00000000 FA050000
+> t
+ok
+> s
+DHCSR 0x00030003  halted=y lockup=n
+```
+
+That dump is CPUID, ICSR, VTOR and AIRCR. Two things in it are worth knowing. AIRCR reads
+back `0xFA05` in its top half although writes need `0x05FA`, so a read-modify-write cannot
+accidentally supply the key. And ICSR `0x803` is VECTACTIVE=3, a HardFault, which is what
+a blank chip does: it fetches `0xFFFFFFFF` for both the stack pointer and the reset vector
+and faults immediately.
 
 ## Code layout
 
@@ -66,7 +105,8 @@ screen /dev/ttyACM0 115200
 | `src/ap.c` | Access Port. AP register access and MEM-AP setup. |
 | `src/cortex.c` | ARMv7-M debug. Halt, resume, and reset-halt through DHCSR, DEMCR and AIRCR. |
 | `src/flash.c` | STM32F4 flash controller. Unlock, word programming, sector erase. |
-| `src/uart.c` | Minimal UART transmit and hex printing. Hand-rolled instead of `stdio.h`, which would cost over a kilobyte of flash. |
+| `src/shell.c` | The UART command shell. Help text lives in `PROGMEM` so it costs flash rather than the 2KB of SRAM. |
+| `src/uart.c` | Minimal UART transmit, receive and hex printing. Hand-rolled instead of `stdio.h`, which would cost over a kilobyte of flash. |
 
 ## Protocol notes
 
@@ -266,8 +306,8 @@ across 1KB  ack=0x01 256 bytes in 57 ms  verify OK
 The second write starts at `0x080003F0` deliberately, so it straddles the 1KB boundary
 where TAR auto-increment stops being guaranteed.
 
-Next: core register access through DCRSR and DCRDR, and a UART command shell so addresses
-and images can be given at runtime instead of being compiled in.
+Next: core register access through DCRSR and DCRDR, so registers and the PC can be read
+while halted, and a way to stream an image in over UART rather than compiling it in.
 
 ## References
 
