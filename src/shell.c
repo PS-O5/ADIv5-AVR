@@ -195,6 +195,21 @@ static void read_line(char *buf)
 
 static uint32_t rtt_cb;
 
+/*
+ * Flash operations need the core stopped: an erase never completes while the
+ * core fetches from the flash being erased. Report rather than press on, since
+ * the failure otherwise shows up as a stalled erase with no explanation.
+ */
+static uint8_t halt_for_flash(void)
+{
+    uint8_t ack = cortex_halt();
+
+    if (ack != SWD_ACK_OK)
+        P("could not halt the core, flash operations need it stopped\r\n");
+
+    return ack;
+}
+
 static void cmd_connect(void)
 {
     uint32_t idcode = 0;
@@ -435,7 +450,9 @@ static void cmd_mass_erase(void)
         return;
     }
 
-    cortex_halt();
+    if (halt_for_flash() != SWD_ACK_OK)
+        return;
+
     P("erasing, this takes several seconds\r\n");
     report(flash_mass_erase());
 }
@@ -569,8 +586,8 @@ static void cmd_erase(uint32_t arg)
         P(" ");
     }
 
-    /* Do not erase underneath a core that may be fetching from flash. */
-    cortex_halt();
+    if (halt_for_flash() != SWD_ACK_OK)
+        return;
 
     uint8_t ack = flash_erase_sector(sector);
     report(ack);
@@ -748,8 +765,8 @@ static void cmd_break_set(uint32_t addr)
 
 static void cmd_load(uint32_t addr)
 {
-    /* Halt first so the target is not running while its flash changes. */
-    cortex_halt();
+    if (halt_for_flash() != SWD_ACK_OK)
+        return;
 
     P("send binary now, sectors are erased as it goes\r\n");
 

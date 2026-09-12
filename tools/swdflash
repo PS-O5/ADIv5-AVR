@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""Flash a raw binary to the target through the AVR shell.
+
+    tools/swdflash firmware.bin [address]
+
+Drives the same commands you would type (unlock, then the XMODEM loader) and
+sends the file itself. Doing the transfer here rather than handing the port to
+sx avoids the shell's own command echo being mistaken for protocol bytes.
+
+The firmware erases each sector as the transfer reaches it and verifies every
+block, so a report of success here means the flash really matches the file.
+"""
+
+import os
+import sys
+import termios
+import time
+
+SOH, EOT, ACK, NAK, CAN = 0x01, 0x04, 0x06, 0x15, 0x18
+BLOCK = 128
+
+
+def open_port(path):
+    fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
+    a = termios.tcgetattr(fd)
+
+    iflag, oflag, cflag, lflag, ispeed, ospeed, cc = a
+
+    iflag = 0
+    oflag = 0
+    lflag = 0
+    cflag = termios.CS8 | termios.CREAD | termios.CLOCAL
+    # Leave HUPCL off so closing the port does not reset the host board.
+    cflag &= ~termios.HUPCL
+
+    cc = list(cc)
+    cc[termios.VMIN] = 0
+    cc[termios.VTIME] = 1  # 0.1s granularity on reads
+
+    termios.tcsetattr(fd, termios.TCSANOW,
+                      [iflag, oflag, cflag, lflag,
+                       termios.B115200, termios.B115200, cc])
+    return fd
+
+
+def read_byte(fd, timeout):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        data = os.read(fd, 1)
+        if data:
+            return data[0]
+    return None
+
+
+def drain(fd, seconds=1.0, echo=False):
+    deadline = time.time() + seconds
+    out = bytearray()
+    while time.time() < deadline:
+        data = os.read(fd, 256)
+        if data:
+            out += data
+            deadline = time.time() + 0.3
+    if echo and out:
+        sys.stdout.write(out.decode("ascii", "replace"))
+        sys.stdout.flush()
+    return bytes(out)
+
+
+def send_line(fd, text):
+    os.write(fd, (text + "\r").encode())
+
+
+def send_file(fd, data):
+    blocks = (len(data) + BLOCK - 1) // BLOCK
+
+    for index in range(blocks):
+        chunk = data[index * BLOCK:(index + 1) * BLOCK]
+        chunk = chunk.ljust(BLOCK, b"\x1a")
+        number = (index + 1) & 0xFF
+        packet = (bytes([SOH, number, 0xFF - number]) + chunk
+                  + bytes([sum(chunk) & 0xFF]))
+
+        for attempt in range(8):
+            os.write(fd, packet)
+            reply = read_byte(fd, 8.0)
+
+            if reply == ACK:
+                break
+            if reply == CAN:
+                # The firmware cancels on a flash failure and then explains
+                # itself on the same line, so let the caller read that.
+                print()
+                return "cancelled at block %d" % (index + 1)
+        else:
+            return "no ACK for block %d" % (index + 1)
+
+        done = index + 1
+        sys.stdout.write("\r  %d/%d blocks" % (done, blocks))
+        sys.stdout.flush()
+
+    print()
+
+    for _ in range(8):
+        os.write(fd, bytes([EOT]))
+        if read_byte(fd, 2.0) == ACK:
+            return None
+
+    return "no ACK for EOT"
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("usage: %s <file.bin> [address]" % sys.argv[0], file=sys.stderr)
+        return 1
+
+    path = sys.argv[1]
+    address = sys.argv[2] if len(sys.argv) > 2 else "08000000"
+    port = os.environ.get("PORT", "/dev/ttyACM0")
+
+    with open(path, "rb") as handle:
+        data = handle.read()
+
+    print("%s, %d bytes to 0x%s via %s" % (path, len(data), address, port))
+
+    fd = open_port(port)
+    try:
+        # Opening the port resets the host board, so wait for its shell.
+        print("waiting for the host")
+        time.sleep(3)
+        drain(fd, 1.0)
+
+        send_line(fd, "u")
+        time.sleep(0.4)
+        unlock = drain(fd, 0.8).decode("ascii", "replace")
+        print("unlock:", " ".join(unlock.split()))
+
+        send_line(fd, "l " + address)
+
+        # Swallow the echo and banner, and stop at the loader's first NAK. The
+        # loader keeps NAKing once a second, so consuming one costs nothing.
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            byte = read_byte(fd, 1.0)
+            if byte == NAK:
+                break
+        else:
+            raise RuntimeError("the loader never started")
+
+        problem = send_file(fd, data)
+
+        time.sleep(0.5)
+        report = drain(fd, 3.0).decode("ascii", "replace").strip()
+        if report:
+            print(report)
+
+        if problem:
+            print("\nfailed: %s" % problem, file=sys.stderr)
+            return 1
+
+        print("\ndone. 'q' in the shell resets and runs it.")
+    finally:
+        os.close(fd)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

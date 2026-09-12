@@ -57,6 +57,47 @@ The firmware presents a shell over UART at 115200 baud:
 screen /dev/ttyACM0 115200
 ```
 
+## Flashing a real image
+
+`target/` holds a small blinky for the STM32, and `tools/swdflash` sends any raw binary
+through the shell:
+
+```
+make target-flash                        # builds target/blink.bin and sends it
+tools/swdflash firmware.bin 08000000     # or send your own
+PORT=/dev/ttyUSB0 tools/swdflash fw.bin  # PORT overrides the default
+```
+
+The tool drives the same commands you would type, then sends the file itself rather than
+handing the port to `sx`. That matters because the shell echoes what it receives, and a
+separate sender reads that echo as protocol bytes and gives up. Doing the transfer in one
+place avoids the problem entirely.
+
+The blinky is 84 bytes and has no startup code, because nothing in it has an initialiser
+to copy and nothing lives in `.bss`, so the reset vector points straight at the loop. Its
+vector table is the same two words we were writing by hand earlier: the initial stack
+pointer and the reset vector with bit 0 set for Thumb.
+
+### Checking it ran, without watching the LED
+
+Peripheral registers sit at their reset values until something writes them, so the target's
+own state is the proof:
+
+```
+> r 40023830        RCC_AHB1ENR, bit 2 set means our code enabled the GPIOC clock
+0x40023830: 00000004
+> r 40020814        GPIOC_ODR, bit 13 flips as the loop runs
+0x40020814: 00002000
+> r 40020814
+0x40020814: 00000000
+```
+
+`RCC_AHB1ENR` resets to zero, so bit 2 being set shows the initialisation ran. The output
+register changing between two reads shows the loop is executing right now. Reading the
+same value twice in a row is normal rather than a failure: the blink half period is about
+100ms and a read takes a few milliseconds, so consecutive reads usually land inside the
+same half period.
+
 ## Command guide
 
 It connects on startup and gives a `>` prompt. Addresses and values are hex, with or
@@ -350,6 +391,8 @@ costs about one transaction per word instead of three.
 | `src/fpb.c` | Hardware breakpoints through the FPB unit, handling both comparator formats. |
 | `src/dwt.c` | Data watchpoints through the DWT unit. |
 | `src/rtt.c` | Finds the SEGGER RTT control block in target RAM and drains its ring buffers. |
+| `target/` | A small STM32 blinky, for testing the whole chain against real firmware. |
+| `tools/swdflash` | Host side flasher: drives the shell and sends a binary over XMODEM. |
 | `src/flash.c` | STM32F4 flash controller. Unlock, word programming, sector erase. |
 | `src/shell.c` | The UART command shell. String literals live in `PROGMEM` so they cost flash rather than the 2KB of SRAM. |
 | `src/xmodem.c` | XMODEM receive, programming each block into flash as it arrives. |
