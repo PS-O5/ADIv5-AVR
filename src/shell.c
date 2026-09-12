@@ -212,6 +212,10 @@ static void cmd_load(uint32_t addr)
     uint32_t written = 0;
     uint8_t result = xmodem_receive_to_flash(addr, &written);
 
+    /* Read the sticky state before clearing it, so a failure is not hidden. */
+    uint32_t ctrlstat = 0;
+    uint8_t cs_ack = dp_read(DP_CTRLSTAT, &ctrlstat);
+
     /* Programming can leave a sticky error behind; do not hand back a dead link. */
     dp_clear_errors();
 
@@ -245,6 +249,21 @@ static void cmd_load(uint32_t addr)
     uart_print_hex32((uint32_t)(uint16_t)xm_stats.last_blk);
     uart_puts(" inv=0x");
     uart_print_hex32((uint32_t)(uint16_t)xm_stats.last_inv);
+    nl();
+
+    uart_puts("CTRL/STAT ");
+    if (cs_ack == SWD_ACK_OK) {
+        put_hex32(ctrlstat);
+        if (ctrlstat & (1UL << 5))
+            uart_puts(" STICKYERR");
+        if (ctrlstat & (1UL << 1))
+            uart_puts(" STICKYORUN");
+        if (ctrlstat & (1UL << 7))
+            uart_puts(" WDATAERR");
+    } else {
+        uart_puts("unreadable, ack=0x");
+        uart_print_hex8(cs_ack);
+    }
     nl();
 }
 

@@ -30,7 +30,9 @@
 #define FLASH_CR_LOCK      (1UL << 31)
 
 /* Reported when FLASH_SR flags an error rather than the transport failing. */
-#define FLASH_ERR 0xFD
+#define FLASH_ERR    0xFD
+/* Reported when FLASH_CR is still locked, which would otherwise fail silently. */
+#define FLASH_LOCKED 0xFC
 
 uint8_t flash_unlock(void);
 uint8_t flash_lock(void);

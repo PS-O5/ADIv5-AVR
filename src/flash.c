@@ -28,13 +28,32 @@ static uint8_t flash_clear_sr(void)
     return mem_ap_write_word(FLASH_SR, FLASH_SR_EOP | FLASH_SR_ERRORS);
 }
 
+/*
+ * Writes to FLASH_CR are ignored while LOCK is set, so an operation started on
+ * a locked controller never runs, never sets BSY and never reports an error.
+ * Check first rather than succeeding at nothing.
+ */
+static uint8_t flash_check_unlocked(void)
+{
+    uint32_t cr = 0;
+    uint8_t ack = mem_ap_read_word(FLASH_CR, &cr);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    return (cr & FLASH_CR_LOCK) ? FLASH_LOCKED : SWD_ACK_OK;
+}
+
 uint8_t flash_unlock(void)
 {
     uint8_t ack = mem_ap_write_word(FLASH_KEYR, FLASH_KEY1);
     if (ack != SWD_ACK_OK)
         return ack;
 
-    return mem_ap_write_word(FLASH_KEYR, FLASH_KEY2);
+    ack = mem_ap_write_word(FLASH_KEYR, FLASH_KEY2);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    return flash_check_unlocked();
 }
 
 uint8_t flash_lock(void)
@@ -42,10 +61,31 @@ uint8_t flash_lock(void)
     return mem_ap_write_word(FLASH_CR, FLASH_CR_LOCK);
 }
 
+/* Drops PG/SER and reports whatever went wrong first. */
+static uint8_t flash_finish(uint8_t ack, uint32_t sr)
+{
+    uint32_t final_sr = sr;
+    uint8_t wait_ack = flash_wait_busy(&final_sr);
+    uint8_t cr_ack = mem_ap_write_word(FLASH_CR, 0);
+
+    if (ack != SWD_ACK_OK)
+        return ack;
+    if (wait_ack != SWD_ACK_OK)
+        return wait_ack;
+    if (cr_ack != SWD_ACK_OK)
+        return cr_ack;
+
+    return (final_sr & FLASH_SR_ERRORS) ? FLASH_ERR : SWD_ACK_OK;
+}
+
 uint8_t flash_program_word(uint32_t addr, uint32_t value)
 {
     uint32_t sr = 0;
     uint8_t ack = flash_wait_busy(&sr);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    ack = flash_check_unlocked();
     if (ack != SWD_ACK_OK)
         return ack;
 
@@ -59,16 +99,8 @@ uint8_t flash_program_word(uint32_t addr, uint32_t value)
 
     /* The controller intercepts this bus write and programs the word. */
     ack = mem_ap_write_word(addr, value);
-    if (ack != SWD_ACK_OK)
-        return ack;
 
-    ack = flash_wait_busy(&sr);
-    if (ack != SWD_ACK_OK)
-        return ack;
-
-    mem_ap_write_word(FLASH_CR, 0);
-
-    return (sr & FLASH_SR_ERRORS) ? FLASH_ERR : SWD_ACK_OK;
+    return flash_finish(ack, sr);
 }
 
 /* TAR auto-increment is only guaranteed across the bottom 10 address bits. */
@@ -78,6 +110,10 @@ uint8_t flash_write(uint32_t addr, const uint32_t *words, uint16_t count)
 {
     uint32_t sr = 0;
     uint8_t ack = flash_wait_busy(&sr);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    ack = flash_check_unlocked();
     if (ack != SWD_ACK_OK)
         return ack;
 
@@ -101,19 +137,17 @@ uint8_t flash_write(uint32_t addr, const uint32_t *words, uint16_t count)
             ack = ap_write(AP_DRW, words[i]);
     }
 
-    flash_wait_busy(&sr);
-    mem_ap_write_word(FLASH_CR, 0);
-
-    if (ack != SWD_ACK_OK)
-        return ack;
-
-    return (sr & FLASH_SR_ERRORS) ? FLASH_ERR : SWD_ACK_OK;
+    return flash_finish(ack, sr);
 }
 
 uint8_t flash_erase_sector(uint8_t sector)
 {
     uint32_t sr = 0;
     uint8_t ack = flash_wait_busy(&sr);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    ack = flash_check_unlocked();
     if (ack != SWD_ACK_OK)
         return ack;
 
@@ -129,14 +163,6 @@ uint8_t flash_erase_sector(uint8_t sector)
         return ack;
 
     ack = mem_ap_write_word(FLASH_CR, cr | FLASH_CR_STRT);
-    if (ack != SWD_ACK_OK)
-        return ack;
 
-    ack = flash_wait_busy(&sr);
-    if (ack != SWD_ACK_OK)
-        return ack;
-
-    mem_ap_write_word(FLASH_CR, 0);
-
-    return (sr & FLASH_SR_ERRORS) ? FLASH_ERR : SWD_ACK_OK;
+    return flash_finish(ack, sr);
 }
