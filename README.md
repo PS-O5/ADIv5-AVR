@@ -109,6 +109,23 @@ flowchart TB
 | `xmodem.c` `rtt.c` | Image transfer both ways, and target `printf` |
 | `shell.c` | The command line |
 
+## Things that cost time
+
+| | |
+|---|---|
+| Turnaround is asymmetric | The park bit covers host to target. Target to host needs two clocks. |
+| One extra clock breaks the ACK | A real OK reads as FAULT, and everything after it desyncs. |
+| CSW needs its Prot bits | Without `0x23000000` the AHB access is rejected and STICKYERR latches. |
+| Sub-word data rides in byte lanes | A byte at `...03` arrives in bits [31:24], not at the bottom. |
+| TAR auto-increment stops at 1KB | Rewrite it at every boundary. |
+| Timeouts belong in milliseconds | Poll counts shrank a hundredfold when the SWD clock went up. |
+| Halt before touching flash | An erase never finishes while the core fetches from that flash. |
+| A locked flash controller lies | Writes to FLASH_CR are ignored and the operation reports success. |
+| Sticky errors outlive line resets | Only a write to ABORT clears them. |
+| Dropped UART bytes surface late | No receive interrupt meant a lost command failed five steps later. |
+
+Full detail, and the bugs behind each one, in [docs/NOTES.md](docs/NOTES.md).
+
 ## Commands
 
 Addresses and values are hex. Counts, sizes and slots are decimal.
@@ -128,23 +145,6 @@ Addresses and values are hex. Counts, sizes and slots are decimal.
 | `l <addr>` | load a binary over XMODEM | `y <addr> <len>` | save memory to a file |
 | `rtt [base] [len]` | stream target output | `?` | help |
 
-## Things that cost time
-
-| | |
-|---|---|
-| Turnaround is asymmetric | The park bit covers host to target. Target to host needs two clocks. |
-| One extra clock breaks the ACK | A real OK reads as FAULT, and everything after it desyncs. |
-| CSW needs its Prot bits | Without `0x23000000` the AHB access is rejected and STICKYERR latches. |
-| Sub-word data rides in byte lanes | A byte at `...03` arrives in bits [31:24], not at the bottom. |
-| TAR auto-increment stops at 1KB | Rewrite it at every boundary. |
-| Timeouts belong in milliseconds | Poll counts shrank a hundredfold when the SWD clock went up. |
-| Halt before touching flash | An erase never finishes while the core fetches from that flash. |
-| A locked flash controller lies | Writes to FLASH_CR are ignored and the operation reports success. |
-| Sticky errors outlive line resets | Only a write to ABORT clears them. |
-| Dropped UART bytes surface late | No receive interrupt meant a lost command failed five steps later. |
-
-Full detail, and the bugs behind each one, in [docs/NOTES.md](docs/NOTES.md).
-
 ## Footprint
 
 | | Used | Of |
@@ -154,6 +154,18 @@ Full detail, and the bugs behind each one, in [docs/NOTES.md](docs/NOTES.md).
 
 String literals live in `PROGMEM`. Before that, `.data` alone was 1396 bytes and there was
 barely enough stack left for XMODEM's 128 byte buffer.
+
+## Scope
+
+- Tested against an STM32F411 (Black Pill). The SWD, DP, AP and Cortex-M layers are
+  architectural and should hold for any Cortex-M, but `flash.c` is written to the
+  F4 flash controller and nothing else has been tried.
+- No GDB server. The interface is the shell over UART, not `target extended-remote`.
+- One target, one AP, no multidrop and no JTAG.
+- SWD only, at whatever rate the bit-bang loop manages. Around 4.4KB/s for bulk
+  writes, so a 64KB image takes about 15 seconds.
+- RDP level 2 is not reachable from here, on purpose. See the option bytes section
+  in the notes.
 
 ## Layout
 
@@ -175,3 +187,5 @@ docs/NOTES.md    engineering notes
 - **STM32F411 reference manual** (RM0383) **and datasheet**. Flash controller, option
   bytes, sector layout, PA13/PA14 defaults, 5V-tolerant pins, BOOT0.
 - **ATmega328P datasheet**. DDR, PORT and PIN semantics, USART, U2X baud.
+
+## License / MIT. See [LICENSE](LICENSE).
