@@ -26,6 +26,9 @@ static const char help_text[] PROGMEM =
     "f              flash size and sector map\r\n"
     "e <sect|addr>  erase sector, or the one holding addr\r\n"
     "p <addr> <val> program flash word\r\n"
+    "o              option bytes and readout protection\r\n"
+    "z              mass erase (confirms first)\r\n"
+    "v              drop readout protection (confirms first)\r\n"
     "l <addr>       load binary via xmodem\r\n"
     "y <addr> <len> save memory via xmodem\r\n"
     "x              core registers (halted only)\r\n"
@@ -40,6 +43,9 @@ static const char help_text[] PROGMEM =
     "j [slot]       clear one watchpoint, or all\r\n"
     "?              this help\r\n";
 
+/* Keeps string literals in flash. The AVR has 2KB of RAM and .data was eating it. */
+#define P(str) do { static const char _lit[] PROGMEM = (str); puts_P(_lit); } while (0)
+
 static void puts_P(const char *s)
 {
     char c;
@@ -49,21 +55,21 @@ static void puts_P(const char *s)
 
 static void nl(void)
 {
-    uart_puts("\r\n");
+    P("\r\n");
 }
 
 static void put_hex32(uint32_t v)
 {
-    uart_puts("0x");
+    P("0x");
     uart_print_hex32(v);
 }
 
 static void report(uint8_t ack)
 {
     if (ack == SWD_ACK_OK) {
-        uart_puts("ok");
+        P("ok");
     } else {
-        uart_puts("failed, ack=0x");
+        P("failed, ack=0x");
         uart_print_hex8(ack);
     }
     nl();
@@ -172,7 +178,7 @@ static void read_line(char *buf)
         }
 
         if ((c == 0x08 || c == 0x7F) && n) {
-            uart_puts("\b \b");
+            P("\b \b");
             n--;
             continue;
         }
@@ -189,9 +195,9 @@ static void cmd_connect(void)
     uint32_t idcode = 0;
     uint8_t ack = dp_connect(&idcode);
 
-    uart_puts("DPIDR ");
+    P("DPIDR ");
     put_hex32(idcode);
-    uart_puts("  ");
+    P("  ");
 
     if (ack != SWD_ACK_OK) {
         report(ack);
@@ -216,24 +222,24 @@ static void cmd_ids(void)
     uint32_t v = 0;
 
     dp_read(DP_DPIDR, &v);
-    uart_puts("DPIDR  ");
+    P("DPIDR  ");
     put_hex32(v);
     nl();
 
     ap_select(0, 0xF);
     ap_read(AP_IDR, &v);
-    uart_puts("AP IDR ");
+    P("AP IDR ");
     put_hex32(v);
     nl();
     ap_select(0, 0x0);
 
     mem_ap_read_word(0xE000ED00UL, &v);
-    uart_puts("CPUID  ");
+    P("CPUID  ");
     put_hex32(v);
     nl();
 
     mem_ap_read_word(0xE0042000UL, &v);
-    uart_puts("DBGMCU ");
+    P("DBGMCU ");
     put_hex32(v);
     nl();
 }
@@ -247,17 +253,17 @@ static void cmd_dump(uint32_t addr, uint32_t count)
             if (i)
                 nl();
             put_hex32(a);
-            uart_puts(":");
+            P(":");
         }
 
         uint32_t v = 0;
         uint8_t ack = mem_ap_read_word(a, &v);
 
-        uart_puts(" ");
+        P(" ");
         if (ack == SWD_ACK_OK)
             uart_print_hex32(v);
         else
-            uart_puts("--------");
+            P("--------");
     }
     nl();
 }
@@ -272,11 +278,11 @@ static void cmd_status(void)
         return;
     }
 
-    uart_puts("DHCSR ");
+    P("DHCSR ");
     put_hex32(dhcsr);
-    uart_puts("  halted=");
+    P("  halted=");
     uart_putc((dhcsr & DHCSR_S_HALT) ? 'y' : 'n');
-    uart_puts(" lockup=");
+    P(" lockup=");
     uart_putc((dhcsr & DHCSR_S_LOCKUP) ? 'y' : 'n');
     nl();
 }
@@ -289,13 +295,13 @@ static void reg_label(uint8_t i)
         if (i < 10)
             uart_putc(' ');
     } else if (i == REG_SP) {
-        uart_puts("sp ");
+        P("sp ");
     } else if (i == REG_LR) {
-        uart_puts("lr ");
+        P("lr ");
     } else if (i == REG_PC) {
-        uart_puts("pc ");
+        P("pc ");
     } else {
-        uart_puts("psr");
+        P("psr");
     }
 }
 
@@ -303,12 +309,12 @@ static void cmd_regs(void)
 {
     uint32_t dhcsr = 0;
     if (cortex_read_dhcsr(&dhcsr) != SWD_ACK_OK) {
-        uart_puts("cannot read DHCSR\r\n");
+        P("cannot read DHCSR\r\n");
         return;
     }
 
     if (!(dhcsr & DHCSR_S_HALT)) {
-        uart_puts("core is running, halt first\r\n");
+        P("core is running, halt first\r\n");
         return;
     }
 
@@ -321,12 +327,12 @@ static void cmd_regs(void)
         if (ack == SWD_ACK_OK)
             uart_print_hex32(v);
         else
-            uart_puts("--------");
+            P("--------");
 
         if ((i & 3) == 3)
             nl();
         else
-            uart_puts("  ");
+            P("  ");
     }
     nl();
 }
@@ -336,16 +342,16 @@ static void show_pc(void)
     uint32_t pc = 0, psr = 0;
 
     if (cortex_read_reg(REG_PC, &pc) != SWD_ACK_OK) {
-        uart_puts("pc unreadable\r\n");
+        P("pc unreadable\r\n");
         return;
     }
     cortex_read_reg(REG_XPSR, &psr);
 
-    uart_puts("pc ");
+    P("pc ");
     uart_print_hex32(pc);
-    uart_puts("  psr ");
+    P("  psr ");
     uart_print_hex32(psr);
-    uart_puts("  exc ");
+    P("  exc ");
     uart_print_dec(psr & 0x1FF);
     nl();
 }
@@ -358,7 +364,7 @@ static void cmd_step(uint32_t count, uint8_t mask_interrupts)
     for (uint32_t i = 0; i < count; i++) {
         uint8_t ack = cortex_step(mask_interrupts);
         if (ack == CORTEX_NOT_HALTED) {
-            uart_puts("core is running, halt first\r\n");
+            P("core is running, halt first\r\n");
             return;
         }
         if (ack != SWD_ACK_OK) {
@@ -370,26 +376,109 @@ static void cmd_step(uint32_t count, uint8_t mask_interrupts)
     show_pc();
 }
 
+static uint8_t confirmed(const char *what)
+{
+    char line[LINE_MAX];
+
+    uart_puts(what);
+    P("\r\ntype yes to confirm: ");
+    read_line(line);
+
+    return line[0] == 'y' && line[1] == 'e' && line[2] == 's' && line[3] == 0;
+}
+
+static void cmd_options(void)
+{
+    uint32_t optcr = 0;
+    uint8_t ack = flash_read_optcr(&optcr);
+
+    if (ack != SWD_ACK_OK) {
+        report(ack);
+        return;
+    }
+
+    P("OPTCR ");
+    put_hex32(optcr);
+    P("  optlock=");
+    uart_putc((optcr & FLASH_OPTCR_OPTLOCK) ? 'y' : 'n');
+    P("  nWRP 0x");
+    /* nWRP is bits [27:16]: twelve sectors on the larger F4 parts. */
+    uart_print_hex8((uint8_t)((optcr >> 24) & 0x0F));
+    uart_print_hex8((uint8_t)(optcr >> 16));
+    nl();
+
+    uint8_t level = 0;
+    if (flash_rdp_level(&level) != SWD_ACK_OK)
+        return;
+
+    P("readout protection: level ");
+    uart_print_dec(level);
+    if (level == 0)
+        P(", flash readable\r\n");
+    else if (level == 1)
+        P(", flash blocked, removable by mass erase\r\n");
+    else
+        P(", debug permanently disabled\r\n");
+}
+
+static void cmd_mass_erase(void)
+{
+    if (!confirmed("this erases the entire flash")) {
+        P("cancelled\r\n");
+        return;
+    }
+
+    cortex_halt();
+    P("erasing, this takes several seconds\r\n");
+    report(flash_mass_erase());
+}
+
+static void cmd_unprotect(void)
+{
+    uint8_t level = 0;
+    if (flash_rdp_level(&level) != SWD_ACK_OK) {
+        P("cannot read the protection level\r\n");
+        return;
+    }
+
+    if (level == 0) {
+        P("already level 0, nothing to do\r\n");
+        return;
+    }
+
+    if (level == 2) {
+        P("level 2 cannot be undone\r\n");
+        return;
+    }
+
+    if (!confirmed("dropping protection mass erases the flash")) {
+        P("cancelled\r\n");
+        return;
+    }
+
+    report(flash_remove_readout_protection());
+}
+
 static void cmd_flash_info(void)
 {
     if (flash_probe() != SWD_ACK_OK) {
-        uart_puts("cannot read the flash size register\r\n");
+        P("cannot read the flash size register\r\n");
         return;
     }
 
     uart_print_dec(flash_size_kb());
-    uart_puts("KB, ");
+    P("KB, ");
     uart_print_dec(flash_sectors());
-    uart_puts(" sectors\r\n");
+    P(" sectors\r\n");
 
     for (uint8_t i = 0; i < flash_sectors(); i++) {
-        uart_puts("  ");
+        P("  ");
         uart_print_dec(i);
-        uart_puts("  ");
+        P("  ");
         put_hex32(flash_sector_base(i));
-        uart_puts("  ");
+        P("  ");
         uart_print_dec(flash_sector_size(i) / 1024);
-        uart_puts("KB\r\n");
+        P("KB\r\n");
     }
 }
 
@@ -400,12 +489,12 @@ static void cmd_erase(uint32_t arg)
 
     if (arg >= FLASH_BASE_ADDR) {
         if (flash_sector_of(arg, &sector) != SWD_ACK_OK) {
-            uart_puts("address is not in flash\r\n");
+            P("address is not in flash\r\n");
             return;
         }
-        uart_puts("sector ");
+        P("sector ");
         uart_print_dec(sector);
-        uart_puts(" ");
+        P(" ");
     }
 
     /* Do not erase underneath a core that may be fetching from flash. */
@@ -418,9 +507,9 @@ static void cmd_erase(uint32_t arg)
         uint32_t sr = 0, cr = 0;
         mem_ap_read_word(FLASH_SR, &sr);
         mem_ap_read_word(FLASH_CR, &cr);
-        uart_puts("  FLASH_SR ");
+        P("  FLASH_SR ");
         put_hex32(sr);
-        uart_puts("  FLASH_CR ");
+        P("  FLASH_CR ");
         put_hex32(cr);
         nl();
     }
@@ -428,22 +517,22 @@ static void cmd_erase(uint32_t arg)
 
 static void cmd_save(uint32_t addr, uint32_t length)
 {
-    uart_puts("start the receiver now\r\n");
+    P("start the receiver now\r\n");
 
     uint32_t sent = 0;
     uint8_t result = xmodem_send_memory(addr, length, &sent);
 
     nl();
     uart_print_dec(sent);
-    uart_puts(" bytes from ");
+    P(" bytes from ");
     put_hex32(addr);
-    uart_puts(": ");
+    P(": ");
 
     switch (result) {
-    case XMODEM_OK:       uart_puts("ok");              break;
-    case XMODEM_TIMEOUT:  uart_puts("timed out");       break;
-    case XMODEM_CANCELED: uart_puts("canceled");        break;
-    default:              uart_puts("target read failed"); break;
+    case XMODEM_OK:       P("ok");              break;
+    case XMODEM_TIMEOUT:  P("timed out");       break;
+    case XMODEM_CANCELED: P("canceled");        break;
+    default:              P("target read failed"); break;
     }
     nl();
 }
@@ -451,19 +540,19 @@ static void cmd_save(uint32_t addr, uint32_t length)
 static void watch_mode(uint8_t function)
 {
     if (function == DWT_FUNC_READ)
-        uart_puts("read ");
+        P("read ");
     else if (function == DWT_FUNC_WRITE)
-        uart_puts("write");
+        P("write");
     else if (function == DWT_FUNC_RW)
-        uart_puts("both ");
+        P("both ");
     else
-        uart_puts("off  ");
+        P("off  ");
 }
 
 static void cmd_watch_list(void)
 {
     uart_print_dec(dwt_slots());
-    uart_puts(" watchpoint slots\r\n");
+    P(" watchpoint slots\r\n");
 
     for (uint8_t i = 0; i < dwt_slots(); i++) {
         uint32_t addr = 0;
@@ -472,15 +561,15 @@ static void cmd_watch_list(void)
         if (dwt_get(i, &addr, &function, &matched) != SWD_ACK_OK)
             continue;
 
-        uart_puts("  ");
+        P("  ");
         uart_print_dec(i);
-        uart_puts("  ");
+        P("  ");
         watch_mode(function);
         if (function != DWT_FUNC_DISABLED) {
-            uart_puts("  ");
+            P("  ");
             put_hex32(addr);
             if (matched)
-                uart_puts("  matched");
+                P("  matched");
         }
         nl();
     }
@@ -513,26 +602,26 @@ static void cmd_watch_set(uint32_t addr, char mode)
             return;
         }
 
-        uart_puts("watchpoint ");
+        P("watchpoint ");
         uart_print_dec(i);
-        uart_puts(" on ");
+        P(" on ");
         watch_mode(function);
-        uart_puts(" at ");
+        P(" at ");
         put_hex32(addr);
         nl();
         return;
     }
 
-    uart_puts("no free slots\r\n");
+    P("no free slots\r\n");
 }
 
 static void cmd_break_list(void)
 {
-    uart_puts("fpb rev ");
+    P("fpb rev ");
     uart_print_dec(fpb_revision());
-    uart_puts(", ");
+    P(", ");
     uart_print_dec(fpb_slots());
-    uart_puts(" slots\r\n");
+    P(" slots\r\n");
 
     for (uint8_t i = 0; i < fpb_slots(); i++) {
         uint32_t comp = 0, addr = 0;
@@ -541,7 +630,7 @@ static void cmd_break_list(void)
         if (fpb_get(i, &comp, &addr, &enabled) != SWD_ACK_OK)
             continue;
 
-        uart_puts("  ");
+        P("  ");
         uart_print_dec(i);
         uart_puts(enabled ? " enabled  " : " free     ");
         if (enabled)
@@ -566,7 +655,7 @@ static void cmd_break_set(uint32_t addr)
 
         ack = fpb_set(i, addr);
         if (ack == FPB_OUT_OF_RANGE) {
-            uart_puts("this fpb only breaks below 0x20000000\r\n");
+            P("this fpb only breaks below 0x20000000\r\n");
             return;
         }
         if (ack != SWD_ACK_OK) {
@@ -574,15 +663,15 @@ static void cmd_break_set(uint32_t addr)
             return;
         }
 
-        uart_puts("breakpoint ");
+        P("breakpoint ");
         uart_print_dec(i);
-        uart_puts(" at ");
+        P(" at ");
         put_hex32(addr);
         nl();
         return;
     }
 
-    uart_puts("no free slots\r\n");
+    P("no free slots\r\n");
 }
 
 static void cmd_load(uint32_t addr)
@@ -590,7 +679,7 @@ static void cmd_load(uint32_t addr)
     /* Halt first so the target is not running while its flash changes. */
     cortex_halt();
 
-    uart_puts("send binary now (erase the sectors first)\r\n");
+    P("send binary now (erase the sectors first)\r\n");
 
     uint32_t written = 0;
     uint8_t result = xmodem_receive_to_flash(addr, &written);
@@ -604,47 +693,47 @@ static void cmd_load(uint32_t addr)
 
     nl();
     uart_print_dec(written);
-    uart_puts(" bytes to ");
+    P(" bytes to ");
     put_hex32(addr);
-    uart_puts(": ");
+    P(": ");
 
     switch (result) {
-    case XMODEM_OK:       uart_puts("ok");             break;
-    case XMODEM_TIMEOUT:  uart_puts("timed out");      break;
-    case XMODEM_CANCELED: uart_puts("canceled");       break;
-    default:              uart_puts("flash write failed"); break;
+    case XMODEM_OK:       P("ok");             break;
+    case XMODEM_TIMEOUT:  P("timed out");      break;
+    case XMODEM_CANCELED: P("canceled");       break;
+    default:              P("flash write failed"); break;
     }
     nl();
 
-    uart_puts("naks=");
+    P("naks=");
     uart_print_dec(xm_stats.naks_sent);
-    uart_puts(" ok=");
+    P(" ok=");
     uart_print_dec(xm_stats.blocks_ok);
-    uart_puts(" badsum=");
+    P(" badsum=");
     uart_print_dec(xm_stats.bad_checksum);
-    uart_puts(" badblk=");
+    P(" badblk=");
     uart_print_dec(xm_stats.bad_blocknum);
-    uart_puts(" resync=");
+    P(" resync=");
     uart_print_dec(xm_stats.resyncs);
-    uart_puts(" first=0x");
+    P(" first=0x");
     uart_print_hex32((uint32_t)(uint16_t)xm_stats.first_byte);
-    uart_puts(" blk=0x");
+    P(" blk=0x");
     uart_print_hex32((uint32_t)(uint16_t)xm_stats.last_blk);
-    uart_puts(" inv=0x");
+    P(" inv=0x");
     uart_print_hex32((uint32_t)(uint16_t)xm_stats.last_inv);
     nl();
 
-    uart_puts("CTRL/STAT ");
+    P("CTRL/STAT ");
     if (cs_ack == SWD_ACK_OK) {
         put_hex32(ctrlstat);
         if (ctrlstat & (1UL << 5))
-            uart_puts(" STICKYERR");
+            P(" STICKYERR");
         if (ctrlstat & (1UL << 1))
-            uart_puts(" STICKYORUN");
+            P(" STICKYORUN");
         if (ctrlstat & (1UL << 7))
-            uart_puts(" WDATAERR");
+            P(" WDATAERR");
     } else {
-        uart_puts("unreadable, ack=0x");
+        P("unreadable, ack=0x");
         uart_print_hex8(cs_ack);
     }
     nl();
@@ -667,7 +756,7 @@ static void dispatch(const char *line)
      * address 0xC.
      */
     if (*line && *line != ' ') {
-        uart_puts("unknown command, ? for help\r\n");
+        P("unknown command, ? for help\r\n");
         return;
     }
 
@@ -684,7 +773,7 @@ static void dispatch(const char *line)
 
     case 'r':
         if (!parse_hex(&line, &a)) {
-            uart_puts("need an address\r\n");
+            P("need an address\r\n");
             break;
         }
         if (!parse_dec(&line, &b))
@@ -704,7 +793,7 @@ static void dispatch(const char *line)
             } else if (b == 4) {
                 ack = mem_ap_read_word(a, &v);
             } else {
-                uart_puts("size must be 1, 2 or 4\r\n");
+                P("size must be 1, 2 or 4\r\n");
                 break;
             }
 
@@ -714,7 +803,7 @@ static void dispatch(const char *line)
             }
 
             put_hex32(a);
-            uart_puts(": ");
+            P(": ");
             if (b == 1) {
                 uart_print_hex8((uint8_t)v);
             } else if (b == 2) {
@@ -729,7 +818,7 @@ static void dispatch(const char *line)
 
     case 'd':
         if (!parse_hex(&line, &a)) {
-            uart_puts("need an address\r\n");
+            P("need an address\r\n");
             break;
         }
         if (!parse_hex(&line, &b))
@@ -739,7 +828,7 @@ static void dispatch(const char *line)
 
     case 'w':
         if (!parse_hex(&line, &a) || !parse_hex(&line, &b)) {
-            uart_puts("need an address and a value\r\n");
+            P("need an address and a value\r\n");
             break;
         }
         {
@@ -753,7 +842,7 @@ static void dispatch(const char *line)
             else if (size == 4)
                 report(mem_ap_write_word(a, b));
             else
-                uart_puts("size must be 1, 2 or 4\r\n");
+                P("size must be 1, 2 or 4\r\n");
         }
         break;
 
@@ -781,9 +870,21 @@ static void dispatch(const char *line)
         cmd_flash_info();
         break;
 
+    case 'o':
+        cmd_options();
+        break;
+
+    case 'z':
+        cmd_mass_erase();
+        break;
+
+    case 'v':
+        cmd_unprotect();
+        break;
+
     case 'e':
         if (!parse_hex(&line, &a)) {
-            uart_puts("need a sector number or a flash address\r\n");
+            P("need a sector number or a flash address\r\n");
             break;
         }
         cmd_erase(a);
@@ -791,7 +892,7 @@ static void dispatch(const char *line)
 
     case 'p':
         if (!parse_hex(&line, &a) || !parse_hex(&line, &b)) {
-            uart_puts("need an address and a value\r\n");
+            P("need an address and a value\r\n");
             break;
         }
         report(flash_program_word(a, b));
@@ -799,7 +900,7 @@ static void dispatch(const char *line)
 
     case 'y':
         if (!parse_hex(&line, &a) || !parse_hex(&line, &b)) {
-            uart_puts("need an address and a length\r\n");
+            P("need an address and a length\r\n");
             break;
         }
         cmd_save(a, b);
@@ -828,7 +929,7 @@ static void dispatch(const char *line)
         } else {
             for (uint8_t i = 0; i < dwt_slots(); i++)
                 dwt_clear(i);
-            uart_puts("all cleared\r\n");
+            P("all cleared\r\n");
         }
         break;
 
@@ -838,7 +939,7 @@ static void dispatch(const char *line)
         } else {
             for (uint8_t i = 0; i < fpb_slots(); i++)
                 fpb_clear(i);
-            uart_puts("all cleared\r\n");
+            P("all cleared\r\n");
         }
         break;
 
@@ -860,13 +961,13 @@ static void dispatch(const char *line)
                 break;
             }
             if (!parse_hex(&line, &b)) {
-                uart_puts("need a value to write\r\n");
+                P("need a value to write\r\n");
                 break;
             }
 
             uint8_t ack = cortex_write_reg(reg, b);
             if (ack == CORTEX_NOT_HALTED)
-                uart_puts("core is running, halt first\r\n");
+                P("core is running, halt first\r\n");
             else
                 report(ack);
         }
@@ -874,7 +975,7 @@ static void dispatch(const char *line)
 
     case 'l':
         if (!parse_hex(&line, &a)) {
-            uart_puts("need an address\r\n");
+            P("need an address\r\n");
             break;
         }
         cmd_load(a);
@@ -885,7 +986,7 @@ static void dispatch(const char *line)
         break;
 
     default:
-        uart_puts("unknown command, ? for help\r\n");
+        P("unknown command, ? for help\r\n");
         break;
     }
 }
@@ -894,11 +995,11 @@ void shell_run(void)
 {
     char line[LINE_MAX];
 
-    uart_puts("\r\nADIv5-AVR, ? for help\r\n");
+    P("\r\nADIv5-AVR, ? for help\r\n");
     cmd_connect();
 
     for (;;) {
-        uart_puts("> ");
+        P("> ");
         read_line(line);
         dispatch(line);
     }

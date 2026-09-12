@@ -255,3 +255,115 @@ uint8_t flash_erase_sector(uint8_t sector)
 
     return flash_finish_ms(ack, sr, BSY_ERASE_MS);
 }
+
+/* A whole-device erase takes seconds, not milliseconds. */
+#define BSY_MASS_ERASE_MS 30000
+
+uint8_t flash_mass_erase(void)
+{
+    uint32_t sr = 0;
+    uint8_t ack = flash_wait_busy(&sr);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    ack = flash_check_unlocked();
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    ack = flash_clear_sr();
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    uint32_t cr = FLASH_CR_PSIZE_X32 | FLASH_CR_MER;
+
+    ack = mem_ap_write_word(FLASH_CR, cr);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    ack = mem_ap_write_word(FLASH_CR, cr | FLASH_CR_STRT);
+
+    return flash_finish_ms(ack, sr, BSY_MASS_ERASE_MS);
+}
+
+uint8_t flash_read_optcr(uint32_t *optcr)
+{
+    return mem_ap_read_word(FLASH_OPTCR, optcr);
+}
+
+uint8_t flash_rdp_level(uint8_t *level)
+{
+    uint32_t optcr = 0;
+    uint8_t ack = flash_read_optcr(&optcr);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    uint8_t rdp = (uint8_t)(optcr >> FLASH_OPTCR_RDP_SHIFT);
+
+    if (rdp == RDP_LEVEL0)
+        *level = 0;
+    else if (rdp == RDP_LEVEL2)
+        *level = 2;
+    else
+        *level = 1;
+
+    return SWD_ACK_OK;
+}
+
+static uint8_t flash_option_unlock(void)
+{
+    uint8_t ack = mem_ap_write_word(FLASH_OPTKEYR, FLASH_OPTKEY1);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    ack = mem_ap_write_word(FLASH_OPTKEYR, FLASH_OPTKEY2);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    uint32_t optcr = 0;
+    ack = flash_read_optcr(&optcr);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    return (optcr & FLASH_OPTCR_OPTLOCK) ? FLASH_LOCKED : SWD_ACK_OK;
+}
+
+/*
+ * Going from level 1 back to level 0 mass erases the flash, by design: the
+ * contents cannot survive protection being dropped.
+ */
+uint8_t flash_remove_readout_protection(void)
+{
+    uint8_t level = 0;
+    uint8_t ack = flash_rdp_level(&level);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    if (level == 2)
+        return FLASH_LOCKED;
+
+    if (level == 0)
+        return SWD_ACK_OK;
+
+    ack = flash_option_unlock();
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    uint32_t optcr = 0;
+    ack = flash_read_optcr(&optcr);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    optcr &= ~(0xFFUL << FLASH_OPTCR_RDP_SHIFT);
+    optcr |= (uint32_t)RDP_LEVEL0 << FLASH_OPTCR_RDP_SHIFT;
+
+    ack = mem_ap_write_word(FLASH_OPTCR, optcr);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    ack = mem_ap_write_word(FLASH_OPTCR, optcr | FLASH_OPTCR_OPTSTRT);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    uint32_t sr = 0;
+    return flash_wait_busy_ms(&sr, BSY_MASS_ERASE_MS);
+}

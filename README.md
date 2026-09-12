@@ -111,6 +111,9 @@ an error instead of being read as `p` with an argument of `c`.
 | `u` | unlock the flash controller |
 | `e <sector\|addr>` | erase a sector, by number or by an address inside it |
 | `p <addr> <val>` | program one flash word |
+| `o` | option bytes and readout protection level |
+| `z` | mass erase, asks for confirmation |
+| `v` | drop readout protection, asks for confirmation |
 
 **Transfer**
 
@@ -310,7 +313,7 @@ costs about one transaction per word instead of three.
 | `src/fpb.c` | Hardware breakpoints through the FPB unit, handling both comparator formats. |
 | `src/dwt.c` | Data watchpoints through the DWT unit. |
 | `src/flash.c` | STM32F4 flash controller. Unlock, word programming, sector erase. |
-| `src/shell.c` | The UART command shell. Help text lives in `PROGMEM` so it costs flash rather than the 2KB of SRAM. |
+| `src/shell.c` | The UART command shell. String literals live in `PROGMEM` so they cost flash rather than the 2KB of SRAM. |
 | `src/xmodem.c` | XMODEM receive, programming each block into flash as it arrives. |
 | `src/uart.c` | Minimal UART transmit, receive and hex printing. Hand-rolled instead of `stdio.h`, which would cost over a kilobyte of flash. |
 
@@ -473,6 +476,30 @@ from it, so `f` reports the real geometry:
 `e` takes either a sector number or an address, resolving an address to the sector holding
 it, and rejects both out-of-range sectors and addresses outside flash.
 
+### Option bytes and readout protection
+
+`o` reports FLASH_OPTCR and decodes the protection level:
+
+```
+> o
+OPTCR 0x0FFFAAED  optlock=y  nWRP 0xFFF
+readout protection: level 0, flash readable
+```
+
+RDP lives in bits [15:8]. `0xAA` is level 0, no protection. `0xCC` is level 2. Anything
+else is level 1, where flash cannot be read over the debug port but protection can still
+be dropped, which mass erases the device as it goes. That erase is the point: the contents
+cannot outlive the protection.
+
+Level 2 disables the debug port permanently. There is no recovery, no tool that undoes it,
+and the chip can never be debugged again. So this project reports RDP and offers exactly
+one change, restoring level 0, and has no way to write an arbitrary RDP value at all. A
+value that cannot be typed cannot be typed by mistake, which seemed better than a
+confirmation prompt in front of an irreversible operation.
+
+Mass erase and dropping protection both ask for a typed confirmation, and mass erase halts
+the core first, for the same reason a sector erase does.
+
 ### Timeouts belong in milliseconds
 
 Flash timeouts were originally poll counts, which really means "however long N SWD
@@ -596,8 +623,9 @@ back out to a file.
 A round trip through the shell, programming a small routine into flash, breaking on it,
 and reading it back, verifies byte for byte against the image that went in.
 
-Possible next steps: mass erase, and reading the option bytes so read protection is
-reported rather than discovered.
+Footprint: about 16KB of the 32KB flash, and 245 bytes of the 2KB of SRAM. Keeping string
+literals in `PROGMEM` matters more than it sounds: before that change `.data` alone was
+1396 bytes, leaving barely enough stack for the 128 byte XMODEM buffer.
 
 ## References
 

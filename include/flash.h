@@ -8,8 +8,21 @@
 #define FLASH_SR   (FLASH_BASE + 0x0C)
 #define FLASH_CR   (FLASH_BASE + 0x10)
 
+#define FLASH_OPTKEYR (FLASH_BASE + 0x08)
+#define FLASH_OPTCR   (FLASH_BASE + 0x14)
+
 #define FLASH_KEY1 0x45670123UL
 #define FLASH_KEY2 0xCDEF89ABUL
+
+#define FLASH_OPTKEY1 0x08192A3BUL
+#define FLASH_OPTKEY2 0x4C5D6E7FUL
+
+#define FLASH_OPTCR_OPTLOCK (1UL << 0)
+#define FLASH_OPTCR_OPTSTRT (1UL << 1)
+#define FLASH_OPTCR_RDP_SHIFT 8
+
+#define RDP_LEVEL0 0xAA  /* no protection */
+#define RDP_LEVEL2 0xCC  /* debug disabled, irreversible */
 
 #define FLASH_SR_EOP    (1UL << 0)
 #define FLASH_SR_OPERR  (1UL << 1)
@@ -24,6 +37,7 @@
 
 #define FLASH_CR_PG        (1UL << 0)
 #define FLASH_CR_SER       (1UL << 1)
+#define FLASH_CR_MER       (1UL << 2)
 #define FLASH_CR_SNB_SHIFT 3
 #define FLASH_CR_PSIZE_X32 (0x2UL << 8)
 #define FLASH_CR_STRT      (1UL << 16)
@@ -51,5 +65,16 @@ uint8_t flash_read_sr(uint32_t *sr);
 uint8_t flash_program_word(uint32_t addr, uint32_t value);
 uint8_t flash_write(uint32_t addr, const uint32_t *words, uint16_t count);
 uint8_t flash_erase_sector(uint8_t sector);
+uint8_t flash_mass_erase(void);
+
+uint8_t flash_read_optcr(uint32_t *optcr);
+uint8_t flash_rdp_level(uint8_t *level);
+
+/*
+ * Restores RDP to level 0 only. Writing an arbitrary RDP value is deliberately
+ * not offered: 0xCC is level 2, which disables debug access permanently with no
+ * way back, and a value that cannot be typed cannot be typed by mistake.
+ */
+uint8_t flash_remove_readout_protection(void);
 
 #endif
