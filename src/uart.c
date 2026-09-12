@@ -1,4 +1,5 @@
 #include <avr/io.h>
+#include <util/delay.h>
 #include "uart.h"
 
 #define BAUD 115200UL
@@ -25,6 +26,19 @@ char uart_getc(void)
     while (!(UCSR0A & (1 << RXC0)))
         ;
     return UDR0;
+}
+
+int16_t uart_getc_timeout(uint16_t ms)
+{
+    while (ms--) {
+        for (uint8_t i = 0; i < 10; i++) {
+            if (UCSR0A & (1 << RXC0))
+                return UDR0;
+            _delay_us(100);
+        }
+    }
+
+    return -1;
 }
 
 void uart_puts(const char *s)

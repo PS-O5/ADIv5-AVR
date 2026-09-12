@@ -5,6 +5,7 @@
 #include "cortex.h"
 #include "flash.h"
 #include "uart.h"
+#include "xmodem.h"
 #include "shell.h"
 
 #define LINE_MAX 40
@@ -22,6 +23,7 @@ static const char help_text[] PROGMEM =
     "u              unlock flash\r\n"
     "e <sector>     erase flash sector\r\n"
     "p <addr> <val> program flash word\r\n"
+    "l <addr>       load binary via xmodem\r\n"
     "?              this help\r\n";
 
 static void puts_P(const char *s)
@@ -200,6 +202,52 @@ static void cmd_status(void)
     nl();
 }
 
+static void cmd_load(uint32_t addr)
+{
+    /* Halt first so the target is not running while its flash changes. */
+    cortex_halt();
+
+    uart_puts("send binary now (erase the sectors first)\r\n");
+
+    uint32_t written = 0;
+    uint8_t result = xmodem_receive_to_flash(addr, &written);
+
+    /* Programming can leave a sticky error behind; do not hand back a dead link. */
+    dp_clear_errors();
+
+    nl();
+    uart_print_dec(written);
+    uart_puts(" bytes to ");
+    put_hex32(addr);
+    uart_puts(": ");
+
+    switch (result) {
+    case XMODEM_OK:       uart_puts("ok");             break;
+    case XMODEM_TIMEOUT:  uart_puts("timed out");      break;
+    case XMODEM_CANCELED: uart_puts("canceled");       break;
+    default:              uart_puts("flash write failed"); break;
+    }
+    nl();
+
+    uart_puts("naks=");
+    uart_print_dec(xm_stats.naks_sent);
+    uart_puts(" ok=");
+    uart_print_dec(xm_stats.blocks_ok);
+    uart_puts(" badsum=");
+    uart_print_dec(xm_stats.bad_checksum);
+    uart_puts(" badblk=");
+    uart_print_dec(xm_stats.bad_blocknum);
+    uart_puts(" resync=");
+    uart_print_dec(xm_stats.resyncs);
+    uart_puts(" first=0x");
+    uart_print_hex32((uint32_t)(uint16_t)xm_stats.first_byte);
+    uart_puts(" blk=0x");
+    uart_print_hex32((uint32_t)(uint16_t)xm_stats.last_blk);
+    uart_puts(" inv=0x");
+    uart_print_hex32((uint32_t)(uint16_t)xm_stats.last_inv);
+    nl();
+}
+
 static void dispatch(const char *line)
 {
     while (*line == ' ')
@@ -293,6 +341,14 @@ static void dispatch(const char *line)
             break;
         }
         report(flash_program_word(a, b));
+        break;
+
+    case 'l':
+        if (!parse_hex(&line, &a)) {
+            uart_puts("need an address\r\n");
+            break;
+        }
+        cmd_load(a);
         break;
 
     case '?':

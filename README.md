@@ -74,6 +74,7 @@ It connects on startup and gives a `>` prompt. Numbers are hex, with or without 
 | `u` | unlock flash |
 | `e <sector>` | erase a flash sector |
 | `p <addr> <val>` | program one flash word |
+| `l <addr>` | load a binary over XMODEM |
 | `?` | help |
 
 ```
@@ -96,6 +97,34 @@ accidentally supply the key. And ICSR `0x803` is VECTACTIVE=3, a HardFault, whic
 a blank chip does: it fetches `0xFFFFFFFF` for both the stack pointer and the reset vector
 and faults immediately.
 
+### Loading a binary
+
+`l <addr>` receives a raw binary over XMODEM and programs it as it arrives, one 128-byte
+block at a time. XMODEM rather than something custom, so ordinary tools can send the file
+with no host script. The target is halted first, and sticky errors are cleared afterwards
+so a programming fault does not leave the link dead.
+
+Unlock and erase before loading. A locked controller ignores the erase silently.
+
+```
+> u
+> e 0
+> l 08000000
+```
+
+Then send the file. In minicom that is `Ctrl-A S`, pick xmodem, space to mark the file,
+enter to send. The receiver NAKs once a second for a minute waiting for the sender, so
+there is time to find the file. Afterwards minicom shows the transfer result in its own
+window and waits for a keypress, which looks like a hang and is not.
+
+Verify with a dump:
+
+```
+> d 08000000 8
+0x08000000: B0000000 B0000001 B0000002 B0000003
+0x08000010: B0000004 B0000005 B0000006 B0000007
+```
+
 ## Code layout
 
 | File | Role |
@@ -106,6 +135,7 @@ and faults immediately.
 | `src/cortex.c` | ARMv7-M debug. Halt, resume, and reset-halt through DHCSR, DEMCR and AIRCR. |
 | `src/flash.c` | STM32F4 flash controller. Unlock, word programming, sector erase. |
 | `src/shell.c` | The UART command shell. Help text lives in `PROGMEM` so it costs flash rather than the 2KB of SRAM. |
+| `src/xmodem.c` | XMODEM receive, programming each block into flash as it arrives. |
 | `src/uart.c` | Minimal UART transmit, receive and hex printing. Hand-rolled instead of `stdio.h`, which would cost over a kilobyte of flash. |
 
 ## Protocol notes
@@ -307,7 +337,7 @@ The second write starts at `0x080003F0` deliberately, so it straddles the 1KB bo
 where TAR auto-increment stops being guaranteed.
 
 Next: core register access through DCRSR and DCRDR, so registers and the PC can be read
-while halted, and a way to stream an image in over UART rather than compiling it in.
+while halted.
 
 ## References
 
