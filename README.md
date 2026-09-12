@@ -19,6 +19,21 @@ Every practical SWD host leans on dedicated hardware: an ST-Link, a CMSIS-DAP pr
 minimum a level shifter between 5V and 3.3V logic. This removes all of it and implements
 ADIv5 directly against the target's 5V-tolerant pins.
 
+## Related work
+
+Bit-banged SWD is not new. [pirate-swd](https://github.com/willdonnelly/pirate-swd)
+drives the protocol from a Bus Pirate with the logic in Python on the PC.
+scanlime's ESP8266 implementation, [ported to xpcc](https://github.com/ekiwi/xpcc-swd)
+for an STM32F3 host, runs the protocol on the microcontroller itself. Black Magic
+Probe is the complete version: a GDB server, flash drivers for many families, on a
+32-bit STM32.
+
+What is unusual here is the combination. The host is 8-bit, with 2KB of RAM and no
+USB. Everything lives on it: the protocol, the Cortex-M debug logic, the flash
+driver, XMODEM and the command line. FPB breakpoints, DWT watchpoints and RTT are
+not usually on the list of things that fit alongside all of that in 18KB. And there
+is no probe silicon and no level shifter in the path, only a resistor.
+
 ## Wiring
 
 ```
