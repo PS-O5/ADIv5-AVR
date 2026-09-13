@@ -28,11 +28,13 @@
 #define DHCSR_S_LOCKUP  (1UL << 19)
 
 #define DEMCR_VC_CORERESET (1UL << 0)
+#define DEMCR_VC_HARDERR   (1UL << 10)
 #define DEMCR_TRCENA       (1UL << 24)
 
 #define AIRCR_VECTKEY     0x05FA0000UL
 #define AIRCR_SYSRESETREQ (1UL << 2)
 
+uint8_t cortex_init(void);
 uint8_t cortex_halt(void);
 uint8_t cortex_resume(void);
 uint8_t cortex_read_dhcsr(uint32_t *value);

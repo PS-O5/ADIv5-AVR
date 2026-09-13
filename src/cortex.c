@@ -3,6 +3,23 @@
 #include "ap.h"
 #include "cortex.h"
 
+/*
+ * Catch hard faults in the debugger instead of letting them dispatch. Without
+ * this a faulting target runs off into whatever the vector table happens to
+ * hold, which on a blank or half programmed chip is nothing, and the symptom
+ * is a wild PC with no sign of where it came from. Vector catch only acts
+ * while C_DEBUGEN is set, so this arms it and the first halt makes it live.
+ */
+uint8_t cortex_init(void)
+{
+    uint32_t demcr = 0;
+    uint8_t ack = mem_ap_read_word(DEMCR, &demcr);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    return mem_ap_write_word(DEMCR, demcr | DEMCR_VC_HARDERR);
+}
+
 uint8_t cortex_halt(void)
 {
     return mem_ap_write_word(DHCSR, DHCSR_DBGKEY | DHCSR_C_DEBUGEN | DHCSR_C_HALT);
@@ -142,7 +159,17 @@ uint8_t cortex_reset_halt(void)
     if (ack != SWD_ACK_OK)
         return ack;
 
-    ack = mem_ap_write_word(DEMCR, DEMCR_VC_CORERESET);
+    /*
+     * Keep whatever else is armed. Writing the bare VC_CORERESET bit clears
+     * TRCENA with it, and a watchpoint set before a reset then stops firing
+     * with nothing to show why.
+     */
+    uint32_t demcr = 0;
+    ack = mem_ap_read_word(DEMCR, &demcr);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    ack = mem_ap_write_word(DEMCR, demcr | DEMCR_VC_CORERESET);
     if (ack != SWD_ACK_OK)
         return ack;
 

@@ -99,6 +99,26 @@ vector catch, then SYSRESETREQ resets the chip and the core halts at the vector 
 before executing an instruction. The system reset does not touch the debug power domain,
 so the SWD connection survives it and no NRST wire is needed.
 
+VC_HARDERR (bit 10) is armed at connect for the same reason in reverse: it halts the core
+on a hard fault instead of letting it run the handler. On a blank or half programmed chip
+the vector table holds nothing useful, so a fault otherwise jumps somewhere arbitrary and
+all that is left is a wild PC with no trace of the instruction that caused it. Vector catch
+only acts while C_DEBUGEN is set, so arming it early costs nothing and the first halt makes
+it live.
+
+The trap happens when the exception is taken, not at the instruction that caused it, and
+that makes a working catch look broken. The core has already stacked a frame and vectored,
+so the dump shows IPSR 3, LR `0xFFFFFFF9` and a PC that is whatever sits in the HardFault
+vector slot. All three read like the fault escaped. The way to tell is that the PC equals
+the word at `0x0800000C`, and the check that settles it is clearing bit 10 and running the
+same fault again: without the catch the core reaches that address, finds the Thumb bit
+clear, faults again and ends in lockup.
+
+DEMCR is one register holding all of this, which makes it easy to break by writing a single
+bit rather than reading first. Writing a bare VC_CORERESET to arm halt-on-reset clears
+TRCENA along with it, and the DWT it gates goes quiet: a watchpoint set before the reset
+stops firing afterwards, with nothing anywhere to say why.
+
 ### Core registers
 
 The core registers are not memory mapped, so there is no address to read R0 from. Writing

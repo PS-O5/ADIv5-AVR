@@ -231,6 +231,7 @@ static void cmd_connect(void)
 
     ack = mem_ap_init();
     if (ack == SWD_ACK_OK) {
+        cortex_init();
         fpb_init();
         dwt_init();
         flash_probe();

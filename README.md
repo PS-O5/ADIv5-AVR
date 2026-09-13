@@ -10,7 +10,7 @@ no level shifter. One resistor and four jumper wires.
                        5V/16MHz              3.3V
 ```
 
-`18.7KB flash · 322B RAM` on the AVR. Halt, step, breakpoints, watchpoints, flash
+`18.9KB flash · 322B RAM` on the AVR. Halt, step, breakpoints, watchpoints, flash
 programming, RTT.
 
 ## Why
@@ -160,7 +160,7 @@ Addresses and values are hex. Counts, sizes and slots are decimal.
 
 | | Used | Of |
 |---|---|---|
-| Flash | 18738 B | 32 KB |
+| Flash | 18864 B | 32 KB |
 | SRAM | 322 B | 2 KB |
 
 String literals live in `PROGMEM`. Before that, `.data` alone was 1396 bytes and there was
