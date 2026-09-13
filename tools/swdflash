@@ -161,6 +161,36 @@ def main():
 
         print("host:", " ".join(banner.split()) or "(prompt)")
 
+        # Connect first. Sending 'u' straight away assumes the debug port is
+        # already up and no sticky error is latched, which stops being true
+        # the moment the target faults: unlock then fails with ack=0x04 and
+        # says nothing about why. Connecting powers the debug domain up and
+        # clears the error flags. Halting matters too, because a target with
+        # no valid code in flash is off in a fault handler.
+        send_line(fd, "c")
+        reply = wait_for_prompt(fd, 5.0)
+
+        if reply is None or "ok" not in reply:
+            raise RuntimeError("connect not acknowledged: %r" % (reply,))
+
+        print("connect: ok")
+
+        # Reset, not just halt. FLASH_KEYR takes two key writes in sequence,
+        # and a wrong or out of order value raises a bus error and locks the
+        # controller until the next reset. So a run that faults between the
+        # two keys leaves the controller waiting for the second one, and every
+        # later attempt starts with what is now the wrong key and locks it
+        # again. Resetting puts that state machine back to a known point, and
+        # halting on the way out keeps a target with no valid code in flash
+        # from running off into a fault handler.
+        send_line(fd, "t")
+        reply = wait_for_prompt(fd, 5.0)
+
+        if reply is None or "ok" not in reply:
+            raise RuntimeError("reset not acknowledged: %r" % (reply,))
+
+        print("reset and halt: ok")
+
         send_line(fd, "u")
         reply = wait_for_prompt(fd, 5.0)
 

@@ -63,6 +63,17 @@ make target-flash            # build target/blink.bin and program the STM32
 screen /dev/ttyACM0 115200   # or drive it by hand
 ```
 
+Or debug it from gdb, which is the same hardware driven through
+[tools/gdbserver](tools/gdbserver):
+
+```sh
+make gdbserver                                    # listens on localhost:3333
+gdb-multiarch target/blink.elf -ex 'target remote localhost:3333'
+```
+
+`load`, `break`, `watch`, `stepi`, `continue` and `info registers` all work.
+`DEBUG=1` logs every packet and its reply when something needs tracing.
+
 ```
 > i
 DPIDR  0x2BA01477     ARM SW-DP
@@ -160,7 +171,17 @@ barely enough stack left for XMODEM's 128 byte buffer.
 - Tested against an STM32F411 (Black Pill). The SWD, DP, AP and Cortex-M layers are
   architectural and should hold for any Cortex-M, but `flash.c` is written to the
   F4 flash controller and nothing else has been tried.
-- No GDB server. The interface is the shell over UART, not `target extended-remote`.
+- `tools/gdbserver` speaks the GDB remote serial protocol on the PC side, driving the
+  shell underneath. Registers, memory, breakpoints, watchpoints, continue, step and
+  `load`, confirmed against real hardware. The memory map, read live from the chip's own
+  sector table, marks flash `type="flash"` with a `blocksize` per sector rather than
+  `type="rom"`: ROM tells GDB the region cannot be written at all and `load` refuses
+  outright with no attempt, where `flash` gets GDB to use its own
+  `vFlashErase`/`vFlashWrite`/`vFlashDone` protocol, unlocking, erasing only the sectors
+  actually touched, and programming through the real flash driver rather than a raw bus
+  write. A plain memory write into the flash range gets the same treatment. Either way,
+  bytes outside the requested range within a word are padded with `0xFF` rather than read
+  back, since flash programming only clears bits and an all-ones byte changes nothing.
 - One target, one AP, no multidrop and no JTAG.
 - SWD only, at whatever rate the bit-bang loop manages. Around 4.4KB/s for bulk
   writes, so a 64KB image takes about 15 seconds.
@@ -174,6 +195,7 @@ src/ include/    AVR firmware
 target/          a small STM32 blinky, to test the whole chain
 tools/swdflash   host side flasher: drives the shell, sends the image
 tools/swdmon     dumps whatever the board sends
+tools/gdbserver  GDB remote serial protocol, bridged onto the shell
 docs/NOTES.md    engineering notes
 hardware/kicad/  schematic and PCB for the wiring
 ```

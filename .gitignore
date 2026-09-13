@@ -13,3 +13,4 @@ hardware/kicad/*.kicad_prl
 hardware/kicad/fp-info-cache
 hardware/kicad/*.lck
 hardware/kicad/.history/
+__pycache__/

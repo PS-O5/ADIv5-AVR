@@ -437,6 +437,31 @@ same half period.
 
 ## Bugs worth remembering
 
+### A failed unlock that keeps itself failing
+
+Unlock started returning `ack=0x04`, a bus fault, and kept returning it on every later
+attempt and from every tool, long after whatever first upset the target was gone.
+
+`FLASH_KEYR` is not a plain register. It takes two key writes in sequence, and the
+reference manual is explicit that a wrong or out of order value raises a bus error and
+locks the controller until the next reset. So a run that faults after the first key
+leaves the controller waiting for the second one. The next attempt opens with the first
+key again, which is now the wrong value, and locks it again. The state that breaks the
+unlock is created by the previous failed unlock.
+
+Two things made it worse. Retrying on a fault was exactly the wrong reflex, because the
+retry is what re-locks the controller. And nothing upstream reset the target, so a tool
+that had worked for months started failing at its first command with no code change
+behind it.
+
+The fix is a reset before the unlock, not a retry after the fault. The reset also
+re-locks the controller, so it has to come before the unlock and must not be repeated
+between the erase and the writes that follow, or the unlock it depends on is thrown away.
+
+The general lesson: a fault code says what happened, not whether repeating the operation
+is safe. A stateful register sequence is not idempotent, and retrying one blindly turns a
+transient failure into a permanent one.
+
 ### A dropped byte, five steps from its symptom
 
 A flash through the tool once failed with nothing more than "target cancelled at block 1",

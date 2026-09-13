@@ -1,0 +1,839 @@
+#!/usr/bin/env python3
+"""GDB remote serial protocol server for ADIv5-AVR.
+
+    tools/gdbserver [port]        # default port 3333
+    arm-none-eabi-gdb firmware.elf -ex "target remote localhost:3333"
+
+Runs on the PC, not the AVR: RSP has real protocol surface (packet framing,
+qXfer, Z-packets, a target description) and the AVR is already at over half
+its flash. This translates GDB's protocol into the same shell commands you
+would type by hand, over the same serial link tools/swdflash uses.
+
+Scope for this version: qSupported, ?, g/G, m/M, c/s and vCont, Z1/z1
+hardware breakpoints, Z2-Z4/z2-z4 watchpoints, and a target description for
+the Cortex-M register set. No software breakpoints (there is no RAM shadow
+of flash to patch), no vCont range stepping, no gdb "load" wired to the
+flash driver yet: writing to flash addresses through M would try a plain
+memory write and fail, not erase and program.
+
+Continue and step are synchronous from the shell's point of view, but the
+AVR has no way to interrupt this script mid-command to say "hit a
+breakpoint". So `c` polls: resume, then repeatedly ask for the register
+dump until the core reports halted, which doubles as the stop event and the
+register fetch for the reply. A Ctrl-C from GDB arrives as a bare 0x03 on
+the same socket, checked between polls.
+"""
+
+import os
+import re
+import select
+import socket
+import sys
+import termios
+import time
+
+PORT_DEFAULT = "/dev/ttyACM0"
+
+# DEBUG=1 logs every packet and its reply. Noisy, but it is what makes a
+# protocol level failure readable.
+DEBUG = os.environ.get("DEBUG") == "1"
+PROMPT = b"> "
+
+REG_NAMES = ["r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9",
+             "r10", "r11", "r12", "sp", "lr", "pc", "psr"]
+REG_PC_INDEX = REG_NAMES.index("pc")
+
+REG_LINE = re.compile(
+    r"\b(r\d{1,2}|sp|lr|pc|psr)\s+([0-9A-Fa-f]{8}|-{8})\b")
+
+# Minimal org.gnu.gdb.arm.m-profile description: r0-r12, sp, lr, pc, xpsr in
+# that order is the standard numbering GDB already expects for Cortex-M, so
+# no explicit regnum is needed.
+TARGET_XML = b"""<?xml version="1.0"?>
+<!DOCTYPE target SYSTEM "gdb-target.dtd">
+<target>
+  <architecture>arm</architecture>
+  <feature name="org.gnu.gdb.arm.m-profile">
+    <reg name="r0" bitsize="32"/>
+    <reg name="r1" bitsize="32"/>
+    <reg name="r2" bitsize="32"/>
+    <reg name="r3" bitsize="32"/>
+    <reg name="r4" bitsize="32"/>
+    <reg name="r5" bitsize="32"/>
+    <reg name="r6" bitsize="32"/>
+    <reg name="r7" bitsize="32"/>
+    <reg name="r8" bitsize="32"/>
+    <reg name="r9" bitsize="32"/>
+    <reg name="r10" bitsize="32"/>
+    <reg name="r11" bitsize="32"/>
+    <reg name="r12" bitsize="32"/>
+    <reg name="sp" bitsize="32" type="data_ptr"/>
+    <reg name="lr" bitsize="32"/>
+    <reg name="pc" bitsize="32" type="code_ptr"/>
+    <reg name="xpsr" bitsize="32"/>
+  </feature>
+</target>
+"""
+
+FLASH_BASE = 0x08000000
+RAM_BASE = 0x20000000
+RAM_SIZE = 0x20000  # 128KB, fixed across the F411 family regardless of flash size
+
+# Filled in once at connect time from the shell's own "f" command, which reads
+# the size straight from the chip rather than assuming one part.
+flash_size = None
+
+
+def build_memory_map_xml(sectors):
+    """type="flash" with a blocksize, one entry per real sector, rather than
+    type="rom": ROM tells GDB the region cannot be written at all, so `load`
+    refuses outright with no attempt. "flash" tells GDB it needs the
+    dedicated vFlashErase/vFlashWrite/vFlashDone protocol instead of a plain
+    write, which is also what keeps GDB from patching a software breakpoint
+    directly into it as if it were ordinary writable memory."""
+    lines = [
+        '<?xml version="1.0"?>',
+        '<!DOCTYPE memory-map',
+        '    PUBLIC "+//IDN gnu.org//DTD GDB Memory Map V1.0//EN"',
+        '    "http://sourceware.org/gdb/gdb-memory-map.dtd">',
+        '<memory-map>',
+    ]
+    for _, base, size in sectors:
+        lines.append('  <memory type="flash" start="0x%08x" length="0x%x">' % (base, size))
+        lines.append('    <property name="blocksize">0x%x</property>' % size)
+        lines.append('  </memory>')
+    lines.append('  <memory type="ram" start="0x%08x" length="0x%x"/>' % (RAM_BASE, RAM_SIZE))
+    lines.append('</memory-map>')
+    lines.append('')
+    return "\n".join(lines).encode()
+
+
+def qxfer_chunk(document, offset, length):
+    chunk = document[offset:offset + length]
+    more = offset + length < len(document)
+    return ("m" if more else "l") + chunk.decode()
+
+
+# ---------------------------------------------------------------------------
+# The AVR side: a thin wrapper around the shell, one command in and its full
+# reply out. Same port handling as tools/swdflash.
+# ---------------------------------------------------------------------------
+
+class AvrShell:
+    def __init__(self, path):
+        self.fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
+        attr = termios.tcgetattr(self.fd)
+        _, _, _, _, _, _, cc = attr
+
+        cflag = termios.CS8 | termios.CREAD | termios.CLOCAL
+        cflag &= ~termios.HUPCL  # do not reset the board by closing the port
+
+        cc = list(cc)
+        cc[termios.VMIN] = 0
+        cc[termios.VTIME] = 1
+
+        termios.tcsetattr(self.fd, termios.TCSANOW,
+                          [0, 0, cflag, 0,
+                           termios.B115200, termios.B115200, cc])
+
+    def close(self):
+        os.close(self.fd)
+
+    def _read_until_prompt(self, timeout):
+        buf = bytearray()
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            data = os.read(self.fd, 256)
+            if data:
+                buf += data
+                if buf.endswith(PROMPT):
+                    return buf.decode("ascii", "replace")
+        return None
+
+    def wait_ready(self, timeout=20.0):
+        """Nudges with a blank line until a prompt comes back, since the
+        board may be mid-boot (bootloader eats it) or already idle
+        (nothing to reset it, so nothing arrives until spoken to)."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            os.write(self.fd, b"\r")
+            reply = self._read_until_prompt(1.5)
+            if reply is not None:
+                return reply
+        raise RuntimeError("no prompt from the host after %.0fs" % timeout)
+
+    def _send_once(self, line, timeout):
+        os.write(self.fd, (line + "\r").encode())
+        reply = self._read_until_prompt(timeout)
+        if reply is None:
+            raise RuntimeError("no reply to %r" % line)
+        return reply
+
+    def send(self, line, timeout=5.0, retries=1):
+        """ack=0x04 is SWD_ACK_FAULT, which means a sticky error is latched in
+        the DP. Repeating the same command does not clear it, so recovery runs
+        a reconnect first, which powers the debug domain back up and clears the
+        error flags, and only then retries. Every other failure code means what
+        it says and is returned unchanged."""
+        reply = self._send_once(line, timeout)
+
+        for _ in range(retries):
+            if "ack=0x04" not in reply:
+                break
+            print("fault on %r, reconnecting" % line)
+            self._send_once("c", timeout)
+            reply = self._send_once(line, timeout)
+
+        return reply
+
+
+# ---------------------------------------------------------------------------
+# Parsing the shell's text replies. Formats matched here are the exact
+# output of cmd_regs, cmd_status, cmd_break_list and cmd_watch_list in
+# src/shell.c; if those change, this breaks with them.
+# ---------------------------------------------------------------------------
+
+def parse_registers(text):
+    """Returns a list of 17 ints in REG_NAMES order, or None if the core is
+    running (the shell refuses register access there)."""
+    if "running" in text:
+        return None
+
+    values = {}
+    for name, hexval in REG_LINE.findall(text):
+        if "-" not in hexval and name not in values:
+            values[name] = int(hexval, 16)
+
+    if len(values) != len(REG_NAMES):
+        return None
+
+    return [values[n] for n in REG_NAMES]
+
+
+BREAK_ROW = re.compile(r"^\s*(\d+)\s+enabled\s+(0x[0-9A-Fa-f]{8})",
+                        re.MULTILINE)
+WATCH_ROW = re.compile(
+    r"^\s*(\d+)\s+(?:read |write|both )\s*(0x[0-9A-Fa-f]{8})?",
+    re.MULTILINE)
+
+
+def find_breakpoint_slot(list_text, addr_hex):
+    for slot, addr in BREAK_ROW.findall(list_text):
+        if addr.upper() == addr_hex.upper():
+            return int(slot)
+    return None
+
+
+def find_watchpoint_slot(list_text, addr_hex):
+    for slot, addr in WATCH_ROW.findall(list_text):
+        if addr and addr.upper() == addr_hex.upper():
+            return int(slot)
+    return None
+
+
+WATCH_ROW_FULL = re.compile(
+    r"^\s*\d+\s+(read |write|both )\s*(0x[0-9A-Fa-f]{8})?(\s+matched)?",
+    re.MULTILINE)
+
+
+def parse_watchpoints(text):
+    """(mode, addr, matched) for every enabled slot, mode stripped of its
+    fixed-width padding."""
+    out = []
+    for mode, addr, matched in WATCH_ROW_FULL.findall(text):
+        if addr:
+            out.append((mode.strip(), addr, bool(matched)))
+    return out
+
+
+def parse_breakpoints(text):
+    return [addr for _, addr in BREAK_ROW.findall(text)]
+
+
+# ---------------------------------------------------------------------------
+# RSP framing: packet = "$" payload "#" checksum, ack is "+", nak is "-".
+# ---------------------------------------------------------------------------
+
+def checksum(data):
+    return sum(data) % 256
+
+
+class RspConn:
+    def __init__(self, sock):
+        self.sock = sock
+        self.buf = bytearray()
+
+    def _fill(self, timeout):
+        readable, _, _ = select.select([self.sock], [], [], timeout)
+        if not readable:
+            return False
+        chunk = self.sock.recv(4096)
+        if not chunk:
+            raise ConnectionError("gdb disconnected")
+        self.buf += chunk
+        return True
+
+    def _byte(self, timeout):
+        deadline = time.time() + timeout
+        while not self.buf:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return None
+            self._fill(remaining)
+        b = self.buf[0]
+        del self.buf[0:1]
+        return b
+
+    def check_interrupt(self):
+        """Non-blocking: True if GDB has sent Ctrl-C (a bare 0x03, outside
+        any $...# packet) since the last check."""
+        self._fill(0)
+        if 0x03 in self.buf:
+            i = self.buf.index(0x03)
+            del self.buf[0:i + 1]
+            return True
+        return False
+
+    def read_packet(self, timeout=None):
+        """Blocks for the next well-formed packet, acking or naking as it
+        goes. Returns the raw payload bytes, or None if the connection
+        closed. Not decoded here: every packet we handle is ASCII, except
+        vFlashWrite's binary-escaped data, which decoding as text would
+        corrupt."""
+        while True:
+            b = self._byte(timeout if timeout is not None else 3600)
+            if b is None:
+                return None
+            if b == 0x03:
+                continue  # a stray interrupt while idle; nothing to stop
+            if b != ord('$'):
+                continue  # noise between packets
+
+            payload = bytearray()
+            while True:
+                b = self._byte(5.0)
+                if b is None:
+                    return None
+                if b == ord('#'):
+                    break
+                payload += bytes([b])
+
+            csum_hex = bytes([self._byte(5.0), self._byte(5.0)])
+            good = int(csum_hex, 16) == checksum(payload)
+
+            self.sock.sendall(b"+" if good else b"-")
+            if good:
+                return bytes(payload)
+
+    def send_packet(self, payload):
+        data = payload.encode() if isinstance(payload, str) else payload
+        packet = b"$" + data + b"#" + ("%02x" % checksum(data)).encode()
+        self.sock.sendall(packet)
+
+        # One retry on a nak or a slow ack; GDB over loopback is reliable
+        # enough that hanging here would be the wrong failure mode.
+        reply = self._byte(2.0)
+        if reply == ord('-'):
+            self.sock.sendall(packet)
+
+
+# ---------------------------------------------------------------------------
+# Value encoding. Target is little-endian, RSP wants raw bytes in address
+# order as hex, which for a 32-bit value is the same bytes a register write
+# would need: least significant byte first.
+# ---------------------------------------------------------------------------
+
+def word_to_le_hex(value):
+    return "".join("%02x" % ((value >> (8 * i)) & 0xFF) for i in range(4))
+
+
+def le_hex_to_word(hexstr):
+    b = bytes.fromhex(hexstr)
+    return int.from_bytes(b, "little")
+
+
+# ---------------------------------------------------------------------------
+# The bridge itself.
+# ---------------------------------------------------------------------------
+
+SECTOR_ROW = re.compile(
+    r"^\s*(\d+)\s+(0x[0-9A-Fa-f]{8})\s+(\d+)KB", re.MULTILINE)
+
+
+class Bridge:
+    def __init__(self, avr):
+        self.avr = avr
+        self.flash_sectors = []   # (index, base, size_bytes)
+        self.erased_sectors = set()
+        self.flash_unlocked = False
+
+    def probe_flash(self):
+        """Reads the real sector map from the shell's own 'f' command rather
+        than duplicating flash.c's geometry logic here; if that logic ever
+        changes, this stays correct without editing."""
+        reply = self.avr.send("f")
+
+        # search, not match: the reply is prefixed with the shell's own echo
+        # of the command, so the summary line is never at position 0.
+        size_match = re.search(r"(\d+)KB", reply)
+        size = int(size_match.group(1)) * 1024 if size_match else None
+
+        self.flash_sectors = [(int(i), int(b, 16), int(kb) * 1024)
+                               for i, b, kb in SECTOR_ROW.findall(reply)]
+        return size
+
+    # -- registers --------------------------------------------------------
+
+    def read_registers(self):
+        return parse_registers(self.avr.send("x"))
+
+    def write_registers(self, values):
+        for name, value in zip(REG_NAMES, values):
+            reply = self.avr.send("x %s %08x" % (name, value))
+            if "ok" not in reply:
+                return False
+        return True
+
+    # -- memory -------------------------------------------------------------
+
+    def read_memory(self, addr, length):
+        if length == 0:
+            return ""
+
+        aligned_start = addr & ~3
+        aligned_end = (addr + length + 3) & ~3
+        count = (aligned_end - aligned_start) // 4
+
+        reply = self.avr.send("d %x %d" % (aligned_start, count))
+
+        words = []
+        for line in reply.splitlines():
+            if ":" not in line:
+                continue
+            _, _, rest = line.partition(":")
+            words.extend(rest.split())
+
+        if len(words) < count or any(w == "--------" for w in words[:count]):
+            return None
+
+        full_hex = "".join(word_to_le_hex(int(w, 16)) for w in words[:count])
+        start = (addr - aligned_start) * 2
+        return full_hex[start:start + length * 2]
+
+    def write_memory(self, addr, data_hex):
+        data = bytes.fromhex(data_hex)
+
+        if flash_size and FLASH_BASE <= addr < FLASH_BASE + flash_size:
+            return self.write_flash(addr, data)
+
+        i = 0
+        while i < len(data):
+            if (addr + i) % 4 == 0 and i + 4 <= len(data):
+                value = int.from_bytes(data[i:i + 4], "little")
+                reply = self.avr.send("w %x %08x 4" % (addr + i, value))
+                i += 4
+            else:
+                reply = self.avr.send("w %x %02x 1" % (addr + i, data[i]))
+                i += 1
+            if "ok" not in reply:
+                return False
+        return True
+
+    # -- flash --------------------------------------------------------------
+
+    def prepare_flash(self):
+        """Reset and halt, then unlock, once per session.
+
+        FLASH_KEYR takes two key writes in sequence, and a wrong or out of
+        order value raises a bus error and locks the controller until the next
+        reset. A run that faults between the two keys therefore leaves the
+        controller waiting for the second key, so every later attempt starts
+        with what is now the wrong value and locks it again. Only a reset
+        clears that.
+
+        The reset also re-locks the controller, so it has to come before the
+        unlock and must not be repeated between the erase and the writes that
+        follow it. Halting on the way out matters separately: an erase never
+        completes while the core is still fetching from the flash being
+        erased, and a target with no valid code in flash is off in a fault
+        handler. gdb sends vFlashErase before any vFlashWrite, so this runs on
+        the erase path, not just before programming."""
+        if self.flash_unlocked:
+            return True
+
+        reply = self.avr.send("t", timeout=10.0)
+        if "ok" not in reply:
+            print("reset and halt failed: %r" % reply)
+            return False
+
+        # No fault retry here. Reconnecting does not reset the flash
+        # controller, so a retry would re-send the first key while it is
+        # waiting for the second, which is what locks it again.
+        reply = self.avr.send("u", retries=0)
+        self.flash_unlocked = "ok" in reply
+        if not self.flash_unlocked:
+            print("unlock failed: %r" % reply)
+        return self.flash_unlocked
+
+    def ensure_erased(self, start, end):
+        """Erases only sectors this session has not already erased. Once a
+        sector is erased it must not be erased again on a later write into
+        the same sector, or an earlier part of the same image would be wiped."""
+        if not self.prepare_flash():
+            return False
+
+        for index, base, size in self.flash_sectors:
+            if index in self.erased_sectors:
+                continue
+            if base < end and start < base + size:
+                print("erasing flash sector %d (0x%08x, %dKB)" % (index, base, size // 1024))
+                reply = self.avr.send("e %d" % index, timeout=15.0)
+                if "ok" not in reply:
+                    print("erase failed for sector %d: %r" % (index, reply))
+                    return False
+                self.erased_sectors.add(index)
+
+        return True
+
+    def write_flash(self, addr, data):
+        """GDB's load writes an ELF section as one contiguous block. Flash
+        only programs whole words, so the write is padded out to a word
+        boundary on each end with 0xFF, which is a no-op against whatever is
+        already there: flash programming only clears bits, and an all-ones
+        byte clears none."""
+        end = addr + len(data)
+        if not self.ensure_erased(addr, end):
+            return False
+
+        aligned_start = addr & ~3
+        aligned_end = (end + 3) & ~3
+        padded = bytearray(b"\xff" * (aligned_end - aligned_start))
+        offset = addr - aligned_start
+        padded[offset:offset + len(data)] = data
+
+        print("programming %d bytes to flash at 0x%08x" % (len(data), addr))
+
+        for i in range(0, len(padded), 4):
+            word = int.from_bytes(padded[i:i + 4], "little")
+            program_addr = aligned_start + i
+            reply = self.avr.send("p %x %08x" % (program_addr, word))
+            if "ok" not in reply:
+                print("program failed at 0x%08x (word 0x%08x): %r"
+                      % (program_addr, word, reply))
+                return False
+        return True
+
+    # -- execution ----------------------------------------------------------
+
+    def halt(self):
+        self.avr.send("h")
+
+    def set_pc(self, addr):
+        self.avr.send("x pc %08x" % addr)
+
+    def step(self):
+        self.avr.send("n")
+        return self.read_registers()
+
+    def resume_and_wait(self, rsp):
+        self.avr.send("g")
+
+        while True:
+            if rsp.check_interrupt():
+                self.halt()
+                # A manual interrupt has no cause to name.
+                return self.read_registers(), None
+
+            regs = self.read_registers()
+            if regs is not None:
+                return regs, self.classify_stop(regs)
+
+            time.sleep(0.2)
+
+    def classify_stop(self, regs):
+        """Why the core is halted, so GDB can tell a real breakpoint or
+        watchpoint hit from every other reason it might be stopped (a manual
+        interrupt, or simply never having been resumed). Both listings are
+        already something the shell prints for its own commands; this reads
+        them again after the fact rather than needing the firmware to report
+        a stop cause itself."""
+        watch_text = self.avr.send("a")
+        for mode, addr, matched in parse_watchpoints(watch_text):
+            if matched:
+                reason = {"write": "watch", "read": "rwatch", "both": "awatch"}[mode]
+                return reason, int(addr, 16)
+
+        if regs is not None:
+            pc_hex = "0x%08X" % regs[REG_PC_INDEX]
+            break_text = self.avr.send("b")
+            # .upper() on "0x.." also capitalizes the prefix; uppercase both
+            # sides the same way rather than assuming one is already normal.
+            if pc_hex.upper() in [a.upper() for a in parse_breakpoints(break_text)]:
+                return "hwbreak", None
+
+        return None, None
+
+    # -- breakpoints ----------------------------------------------------------
+
+    def set_breakpoint(self, addr):
+        reply = self.avr.send("b %x" % addr)
+        return "breakpoint" in reply and "no free" not in reply
+
+    def clear_breakpoint(self, addr):
+        listing = self.avr.send("b")
+        slot = find_breakpoint_slot(listing, "0x%08X" % addr)
+        if slot is not None:
+            self.avr.send("k %d" % slot)
+        return True
+
+    def set_watchpoint(self, addr, mode):
+        reply = self.avr.send("a %x %s" % (addr, mode))
+        return "watchpoint" in reply and "no free" not in reply
+
+    def clear_watchpoint(self, addr):
+        listing = self.avr.send("a")
+        slot = find_watchpoint_slot(listing, "0x%08X" % addr)
+        if slot is not None:
+            self.avr.send("j %d" % slot)
+        return True
+
+
+# ---------------------------------------------------------------------------
+# RSP command dispatch.
+# ---------------------------------------------------------------------------
+
+WATCH_MODE = {"2": "w", "3": "r", "4": "b"}
+
+
+def stop_reply(regs, reason=None):
+    """reason, when known, is (name, addr) from Bridge.classify_stop: a
+    watchpoint kind with the address that matched, "hwbreak" with no address,
+    or None for anything else (a manual interrupt, most likely). Naming the
+    cause is what let us tell a real breakpoint hit from Ctrl-C during
+    testing, where every stop otherwise looks identical."""
+    if regs is None:
+        return "S05"
+
+    pc = regs[REG_PC_INDEX]
+    reply = "T05%02x:%s;" % (REG_PC_INDEX, word_to_le_hex(pc))
+
+    if reason:
+        name, addr = reason
+        reply += ("%s:%x;" % (name, addr)) if addr is not None else ("%s:;" % name)
+
+    return reply
+
+
+def binary_unescape(data):
+    """Reverses RSP binary escaping: 0x7d marks the next byte as escaped,
+    stored XORed with 0x20. vFlashWrite is the one packet whose payload is
+    raw, arbitrary bytes rather than hex text, so this is the one place that
+    needs it."""
+    out = bytearray()
+    i = 0
+    while i < len(data):
+        if data[i] == 0x7D:
+            i += 1
+            out.append(data[i] ^ 0x20)
+        else:
+            out.append(data[i])
+        i += 1
+    return bytes(out)
+
+
+def handle(bridge, rsp, raw):
+    if raw.startswith(b"vFlashWrite:"):
+        # Binary payload: kept as raw bytes end to end, never decoded as
+        # text, since it can legitimately contain any byte value.
+        rest = raw[len(b"vFlashWrite:"):]
+        addr_bytes, _, escaped = rest.partition(b":")
+        addr = int(addr_bytes, 16)
+        data = binary_unescape(escaped)
+        return "OK" if bridge.write_flash(addr, data) else "E01"
+
+    payload = raw.decode("ascii", "replace")
+
+    if payload == "qSupported" or payload.startswith("qSupported:"):
+        return ("PacketSize=1000;qXfer:features:read+;qXfer:memory-map:read+;"
+                "hwbreak+;swbreak-")
+
+    if payload == "?":
+        return stop_reply(bridge.read_registers())
+
+    if payload.startswith("T") and payload[1:].lstrip("-").isdigit():
+        # Thread-alive query. One core, one implicit thread, always alive.
+        # An empty reply here means "no such thread" and GDB reports the
+        # thread as exited right after connecting.
+        return "OK"
+
+    if payload == "qC":
+        return "QC1"
+
+    if payload == "qAttached":
+        return "1"
+
+    if payload.startswith("qXfer:features:read:target.xml:"):
+        offset, length = (int(x, 16) for x in payload.split(":")[-1].split(","))
+        return qxfer_chunk(TARGET_XML, offset, length)
+
+    if payload.startswith("qXfer:memory-map:read::"):
+        offset, length = (int(x, 16) for x in payload.split(":")[-1].split(","))
+        sectors = bridge.flash_sectors or [(0, FLASH_BASE, flash_size or 0x80000)]
+        return qxfer_chunk(build_memory_map_xml(sectors), offset, length)
+
+    if payload.startswith("vFlashErase:"):
+        addr_s, len_s = payload[len("vFlashErase:"):].split(",")
+        addr = int(addr_s, 16)
+        ok = bridge.ensure_erased(addr, addr + int(len_s, 16))
+        return "OK" if ok else "E01"
+
+    if payload == "vFlashDone":
+        # Every vFlashWrite already programs immediately; nothing to flush.
+        return "OK"
+
+    if payload == "g":
+        regs = bridge.read_registers()
+        if regs is None:
+            return "E01"
+        return "".join(word_to_le_hex(v) for v in regs)
+
+    if payload.startswith("G"):
+        hexdata = payload[1:]
+        values = [le_hex_to_word(hexdata[i:i + 8])
+                  for i in range(0, len(hexdata), 8)]
+        return "OK" if bridge.write_registers(values) else "E01"
+
+    if payload.startswith("m"):
+        addr_s, len_s = payload[1:].split(",")
+        result = bridge.read_memory(int(addr_s, 16), int(len_s, 16))
+        return result if result is not None else "E01"
+
+    if payload.startswith("M"):
+        header, _, data = payload[1:].partition(":")
+        addr_s, len_s = header.split(",")
+        ok = bridge.write_memory(int(addr_s, 16), data)
+        return "OK" if ok else "E01"
+
+    if payload.startswith("vCont?"):
+        return "vCont;c;C;s;S"
+
+    if payload.startswith("vCont;"):
+        action = payload.split(";")[1][0]
+        if action in "sS":
+            return stop_reply(bridge.step())
+        regs, reason = bridge.resume_and_wait(rsp)
+        return stop_reply(regs, reason)
+
+    if payload.startswith("c"):
+        if len(payload) > 1:
+            bridge.set_pc(int(payload[1:], 16))
+        regs, reason = bridge.resume_and_wait(rsp)
+        return stop_reply(regs, reason)
+
+    if payload.startswith("s"):
+        if len(payload) > 1:
+            bridge.set_pc(int(payload[1:], 16))
+        return stop_reply(bridge.step())
+
+    if payload.startswith(("Z1,", "z1,")):
+        _, addr_s, _ = payload.split(",")
+        addr = int(addr_s, 16)
+        if payload[0] == "Z":
+            return "OK" if bridge.set_breakpoint(addr) else "E01"
+        bridge.clear_breakpoint(addr)
+        return "OK"
+
+    if payload[:2] in ("Z2", "Z3", "Z4", "z2", "z3", "z4"):
+        _, addr_s, _ = payload.split(",")
+        addr = int(addr_s, 16)
+        mode = WATCH_MODE[payload[1]]
+        if payload[0] == "Z":
+            return "OK" if bridge.set_watchpoint(addr, mode) else "E01"
+        bridge.clear_watchpoint(addr)
+        return "OK"
+
+    if payload == "D":
+        return "OK"
+
+    return ""  # unrecognised: empty reply tells GDB the command is unsupported
+
+
+def serve_one(bridge, sock):
+    rsp = RspConn(sock)
+    print("gdb connected")
+
+    while True:
+        payload = rsp.read_packet()
+        if payload is None:
+            return
+
+        if payload == b"D":
+            rsp.send_packet("OK")
+            return
+        if payload == b"k":
+            return
+
+        try:
+            reply = handle(bridge, rsp, payload)
+        except Exception as exc:  # noqa: BLE001 - report to gdb, keep serving
+            print("error handling %r: %s" % (payload, exc), file=sys.stderr)
+            reply = "E01"
+
+        if DEBUG:
+            # vFlashWrite's payload can be genuinely binary; only decode for
+            # the log line, which tolerates replacement characters fine.
+            logged = (payload if not payload.startswith(b"vFlashWrite:")
+                      else payload[:16] + b"...")
+            print("<- %r  -> %r" % (logged.decode("ascii", "replace"), reply))
+        rsp.send_packet(reply)
+
+
+def main():
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 3333
+    serial_path = os.environ.get("PORT", PORT_DEFAULT)
+
+    avr = AvrShell(serial_path)
+    print("waiting for the host on", serial_path)
+    avr.wait_ready()
+
+    avr.send("c")
+
+    bridge = Bridge(avr)
+    bridge.halt()
+
+    global flash_size
+    flash_size = bridge.probe_flash()
+    if flash_size:
+        print("flash: %dKB, %d sectors, reported as ROM to gdb"
+              % (flash_size // 1024, len(bridge.flash_sectors)))
+    else:
+        print("could not read flash size, defaulting the memory map to 512KB")
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("localhost", port))
+    listener.listen(1)
+    print("listening on localhost:%d" % port)
+
+    try:
+        while True:
+            sock, _ = listener.accept()
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            try:
+                serve_one(bridge, sock)
+            except ConnectionError:
+                pass
+            finally:
+                sock.close()
+                print("gdb disconnected")
+    except KeyboardInterrupt:
+        pass
+    finally:
+        listener.close()
+        avr.close()
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

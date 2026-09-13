@@ -41,8 +41,11 @@ target:
 target-flash: target
 	tools/swdflash $(BIN) $(ADDR)
 
+gdbserver:
+	tools/gdbserver
+
 clean:
 	rm -rf build src/*.o
 	$(MAKE) -C target clean
 
-.PHONY: all build flash clean target target-flash
+.PHONY: all build flash clean target target-flash gdbserver
