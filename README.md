@@ -175,6 +175,7 @@ target/          a small STM32 blinky, to test the whole chain
 tools/swdflash   host side flasher: drives the shell, sends the image
 tools/swdmon     dumps whatever the board sends
 docs/NOTES.md    engineering notes
+hardware/kicad/  schematic and PCB for the wiring
 ```
 
 ## References

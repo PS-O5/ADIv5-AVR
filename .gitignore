@@ -4,3 +4,12 @@ build/
 *.hex
 *.csv
 *.bin
+
+# KiCad
+hardware/kicad/*.bak
+hardware/kicad/*-backups/
+hardware/kicad/_autosave-*
+hardware/kicad/*.kicad_prl
+hardware/kicad/fp-info-cache
+hardware/kicad/*.lck
+hardware/kicad/.history/
