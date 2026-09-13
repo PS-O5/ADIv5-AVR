@@ -145,22 +145,79 @@ Full detail, and the bugs behind each one, in [docs/NOTES.md](docs/NOTES.md).
 
 ## Commands
 
-Addresses and values are hex. Counts, sizes and slots are decimal.
+### Shell, over UART at 115200
 
-| | | | |
+Addresses and values are hex. Counts, sizes and slots are decimal. `?` prints this list.
+
+| Connect | | Memory | |
 |---|---|---|---|
-| `c` `cr` | connect, or connect holding NRST | `b [addr]` | list or set a breakpoint |
-| `i` | DPIDR, AP IDR, CPUID, DBGMCU | `k [slot]` | clear breakpoints |
-| `s` | status, halted and lockup | `a [addr] [rwb] [len]` | list or set a watchpoint |
-| `r <addr> [sz]` | read, size 1, 2 or 4 | `j [slot]` | clear watchpoints |
-| `w <addr> <val> [sz]` | write, same sizes | `f` | flash size and sector map |
-| `d <addr> [n]` | dump n words | `u` | unlock flash |
-| `h` `g` | halt, resume | `e <sect\|addr>` | erase a sector |
-| `t` `q` | reset and halt, reset and run | `p <addr> <val>` | program a word |
-| `n [n]` `m [n]` | step, step with interrupts masked | `z` `v` | mass erase, drop protection |
-| `x [reg] [val]` | core registers | `o` | option bytes and protection |
-| `l <addr>` | load a binary over XMODEM | `y <addr> <len>` | save memory to a file |
-| `rtt [base] [len]` | stream target output | `?` | help |
+| `c` | connect | `r <addr> [sz]` | read, size 1, 2 or 4 |
+| `cr` | connect holding NRST | `w <addr> <val> [sz]` | write, same sizes |
+| `i` | DPIDR, AP IDR, CPUID, DBGMCU | `d <addr> [n]` | dump n words |
+
+| Execution | | Breakpoints and watchpoints | |
+|---|---|---|---|
+| `h` `g` | halt, resume | `b` / `b <addr>` | list, or set a hardware breakpoint |
+| `t` `q` | reset and halt, reset and run | `k [slot]` | clear one breakpoint, or all |
+| `n [count]` | step one instruction | `a` / `a <addr> [rwb] [len]` | list, or watch read, write or both |
+| `m [count]` | step with interrupts masked | `j [slot]` | clear one watchpoint, or all |
+| `s` | status, halted and lockup | | |
+| `x` / `x <reg> <val>` | core registers: r0-r12, sp, lr, pc, psr | | |
+
+| Flash | | Transfer | |
+|---|---|---|---|
+| `u` | unlock | `l <addr>` | load a binary over XMODEM |
+| `f` | size and sector map | `y <addr> <len>` | save memory over XMODEM |
+| `e <sect\|addr>` | erase a sector, or the one holding addr | `rtt [base] [n]` | stream target output |
+| `p <addr> <val>` | program a word | | |
+| `o` | option bytes and readout protection | | |
+| `z` `v` | mass erase, drop protection, both confirm first | | |
+
+### Host tools
+
+```sh
+make flash                      # build and program the AVR host
+make target                     # build target/blink.bin and target/steal.bin
+make target-flash               # program blink to the STM32
+make target-flash BIN=target/steal.bin ADDR=08000000
+make gdbserver                  # RSP server on localhost:3333
+make clean
+
+tools/swdflash <file.bin> [addr]   # what target-flash runs
+tools/swdmon [seconds]             # dump whatever the board sends
+tools/gdbserver [port]             # defaults to 3333
+```
+
+`PORT` overrides the serial device for all three, default `/dev/ttyACM0`. `BOOT_WAIT`
+sets how long `swdflash` waits for a prompt, default 20 seconds. `DEBUG=1` makes
+`gdbserver` log every packet and reply.
+
+`swdflash` and `gdbserver` both fall back to `cr` when a plain connect or reset fails,
+so a target whose firmware has taken the SWD pins is still reachable.
+
+### From gdb
+
+```sh
+gdb-multiarch target/blink.elf -ex 'target remote localhost:3333'
+```
+
+| Works | |
+|---|---|
+| `info registers`, `p $pc`, `set $r0 = ...` | r0-r12, sp, lr, pc, xpsr |
+| `x/4xw <addr>`, `set {int}<addr> = ...` | byte, halfword and word access |
+| `break *<addr>`, `hbreak` | FPB, flash addresses only, six at once |
+| `watch`, `rwatch`, `awatch` | DWT, four slots, length honoured |
+| `stepi`, `continue`, `Ctrl-C` | |
+| `load` | erases, programs and verifies |
+| `detach`, reconnect | |
+
+`break` on a flash address picks a hardware breakpoint on its own, because the memory map
+marks flash as flash. Software breakpoints are not supported, so `break` on a RAM address
+falls back to gdb patching the instruction, and the undefined instruction it writes faults.
+The vector catch stops the core there rather than letting it run off, but gdb will not
+recognise it as its own breakpoint. Use `hbreak` for code in RAM, or accept that it lands
+as a fault. Source level `step` and `next` need a target built with `-g`, which `blink.c`
+is not. There is one core and one thread, so thread commands do nothing.
 
 ## Footprint
 
@@ -188,6 +245,8 @@ barely enough stack left for XMODEM's 128 byte buffer.
   write. A plain memory write into the flash range gets the same treatment. Either way,
   bytes outside the requested range within a word are padded with `0xFF` rather than read
   back, since flash programming only clears bits and an all-ones byte changes nothing.
+  Everything written is read back and compared, so a successful `load` means the flash
+  matches the image, not merely that the writes were sent and acknowledged.
 - One target, one AP, no multidrop and no JTAG.
 - SWD only, at whatever rate the bit-bang loop manages. Around 4.4KB/s for bulk
   writes, so a 64KB image takes about 15 seconds.
@@ -199,6 +258,7 @@ barely enough stack left for XMODEM's 128 byte buffer.
 ```
 src/ include/    AVR firmware
 target/          a small STM32 blinky, to test the whole chain
+                 and steal.c, which takes the SWD pins, to test `cr`
 tools/swdflash   host side flasher: drives the shell, sends the image
 tools/swdmon     dumps whatever the board sends
 tools/gdbserver  GDB remote serial protocol, bridged onto the shell

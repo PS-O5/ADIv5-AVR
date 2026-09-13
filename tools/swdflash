@@ -171,9 +171,20 @@ def main():
         reply = wait_for_prompt(fd, 5.0)
 
         if reply is None or "ok" not in reply:
-            raise RuntimeError("connect not acknowledged: %r" % (reply,))
+            # Target firmware that takes PA13 and PA14 for itself leaves
+            # nothing to attach to, and the only way in is to hold the part in
+            # reset so it never gets to run. Worth trying before giving up,
+            # because this is exactly the case where reflashing is the point.
+            print("connect failed, trying with NRST held")
+            send_line(fd, "cr")
+            reply = wait_for_prompt(fd, 10.0)
 
-        print("connect: ok")
+            if reply is None or "ok" not in reply:
+                raise RuntimeError("connect not acknowledged: %r" % (reply,))
+
+            print("connect under reset: ok")
+        else:
+            print("connect: ok")
 
         # Reset, not just halt. FLASH_KEYR takes two key writes in sequence,
         # and a wrong or out of order value raises a bus error and locks the
@@ -187,9 +198,21 @@ def main():
         reply = wait_for_prompt(fd, 5.0)
 
         if reply is None or "ok" not in reply:
-            raise RuntimeError("reset not acknowledged: %r" % (reply,))
+            # A software reset lets the core run the instant it is released and
+            # relies on the vector catch to stop it in time. Firmware that
+            # takes PA13 and PA14 in its first few instructions can win that
+            # race, and then there is nothing left to talk to. Holding NRST
+            # removes the race: the core never runs at all.
+            print("reset failed, trying with NRST held")
+            send_line(fd, "cr")
+            reply = wait_for_prompt(fd, 10.0)
 
-        print("reset and halt: ok")
+            if reply is None or "ok" not in reply:
+                raise RuntimeError("reset not acknowledged: %r" % (reply,))
+
+            print("reset under NRST: ok")
+        else:
+            print("reset and halt: ok")
 
         send_line(fd, "u")
         reply = wait_for_prompt(fd, 5.0)

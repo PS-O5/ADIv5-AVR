@@ -490,8 +490,14 @@ class Bridge:
 
         reply = self.avr.send("t", timeout=10.0)
         if "ok" not in reply:
-            print("reset and halt failed: %r" % reply)
-            return False
+            # A software reset lets the core run before the vector catch can
+            # confirm the halt, and firmware that takes PA13 and PA14 in its
+            # first instructions wins that window. Holding NRST removes it.
+            print("reset failed, trying with NRST held")
+            reply = self.avr.send("cr", timeout=10.0)
+            if "ok" not in reply:
+                print("reset and halt failed: %r" % reply)
+                return False
 
         # No fault retry here. Reconnecting does not reset the flash
         # controller, so a retry would re-send the first key while it is
@@ -548,6 +554,29 @@ class Bridge:
                 print("program failed at 0x%08x (word 0x%08x): %r"
                       % (program_addr, word, reply))
                 return False
+
+        return self.verify_flash(addr, data)
+
+    def verify_flash(self, addr, data):
+        """Read it back. A word that reports ok has been accepted by the flash
+        controller, which is not the same as the cell holding the value: a
+        sector that was never erased takes only the bits that were already
+        clear, and says nothing. Without this, a successful load means the
+        writes were sent, not that the flash matches."""
+        readback = self.read_memory(addr, len(data))
+
+        if readback is None:
+            print("verify failed: could not read back 0x%08x" % addr)
+            return False
+
+        if readback.lower() != data.hex():
+            for i, (got, want) in enumerate(zip(bytes.fromhex(readback), data)):
+                if got != want:
+                    print("verify failed at 0x%08x: flash has 0x%02x, image has 0x%02x"
+                          % (addr + i, got, want))
+                    break
+            return False
+
         return True
 
     # -- execution ----------------------------------------------------------
@@ -828,7 +857,11 @@ def main():
     print("waiting for the host on", serial_path)
     avr.wait_ready()
 
-    avr.send("c")
+    if "ok" not in avr.send("c"):
+        # Firmware that takes PA13 and PA14 leaves nothing to attach to, so
+        # fall back to holding the part in reset.
+        print("connect failed, trying with NRST held")
+        avr.send("cr", timeout=10.0)
 
     bridge = Bridge(avr)
     bridge.halt()

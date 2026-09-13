@@ -106,6 +106,18 @@ carrying it are gone. Holding NRST low breaks the circle, because the core canno
 the pins stay in their SWD reset state long enough to attach and arm the vector catch
 before a single instruction executes.
 
+The two resets are not equivalent, which is easy to assume and wrong. VC_CORERESET stops
+the core at the vector fetch, but that still happens after SYSRESETREQ has let it go, so
+there is a window between release and the debugger confirming the halt. Firmware that
+takes the pins in its first few instructions wins that window. It shows up as a reset that
+reports failure with ack=0x00, straight after a connect under reset that worked, because
+the connect held the part still and the reset handed it back. Holding NRST removes the
+window rather than racing it, so `swdflash` falls back to `cr` when `t` fails.
+
+Blink never exposed this. It leaves PA13 and PA14 alone, so losing the race costs nothing
+and the halt is confirmed a moment later regardless. It took firmware that fights back for
+the difference between the two resets to be visible at all.
+
 The debug power domain is not held by NRST, which is why the port still answers while
 reset is asserted. How early the core's own debug registers respond varies, so `cr` writes
 DHCSR and DEMCR while reset is held and then repeats the halt request after releasing,
