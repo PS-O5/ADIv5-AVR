@@ -613,8 +613,12 @@ class Bridge:
             self.avr.send("k %d" % slot)
         return True
 
-    def set_watchpoint(self, addr, mode):
-        reply = self.avr.send("a %x %s" % (addr, mode))
+    def set_watchpoint(self, addr, mode, length=1):
+        """The length matters. The DWT matches on an address with some number
+        of low bits ignored, so a watch on a four byte object has to say so,
+        or a byte write to the middle of it never triggers while gdb goes on
+        believing the whole object is covered."""
+        reply = self.avr.send("a %x %s %d" % (addr, mode, length))
         return "watchpoint" in reply and "no free" not in reply
 
     def clear_watchpoint(self, addr):
@@ -771,11 +775,12 @@ def handle(bridge, rsp, raw):
         return "OK"
 
     if payload[:2] in ("Z2", "Z3", "Z4", "z2", "z3", "z4"):
-        _, addr_s, _ = payload.split(",")
+        _, addr_s, len_s = payload.split(",")
         addr = int(addr_s, 16)
         mode = WATCH_MODE[payload[1]]
         if payload[0] == "Z":
-            return "OK" if bridge.set_watchpoint(addr, mode) else "E01"
+            length = int(len_s, 16) or 1
+            return "OK" if bridge.set_watchpoint(addr, mode, length) else "E01"
         bridge.clear_watchpoint(addr)
         return "OK"
 

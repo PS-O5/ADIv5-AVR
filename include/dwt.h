@@ -19,11 +19,12 @@
 #define DWT_FUNC_MATCHED (1UL << 24)
 
 #define DWT_NO_SLOT 0xF7
+#define DWT_BAD_MASK 0xF6
 
 uint8_t dwt_init(void);
 uint8_t dwt_slots(void);
 
-uint8_t dwt_set(uint8_t slot, uint32_t addr, uint8_t function);
+uint8_t dwt_set(uint8_t slot, uint32_t addr, uint8_t function, uint8_t mask);
 uint8_t dwt_clear(uint8_t slot);
 uint8_t dwt_get(uint8_t slot, uint32_t *addr, uint8_t *function, uint8_t *matched);
 

@@ -313,8 +313,20 @@ comparator is a 16 byte block of COMP, MASK and FUNCTION, and NUMCOMP in the top
 DWT_CTRL says how many there are. The F411 has four.
 
 The unit is gated behind TRCENA, bit 24 of DEMCR, and does nothing at all until that is
-set. Arming a watchpoint without it looks like it worked and never fires. MASK is how many
-low address bits to ignore, and is left at zero here so the match is on the exact address.
+set. Arming a watchpoint without it looks like it worked and never fires.
+
+MASK is how many low address bits to ignore, so it decides how much the watchpoint
+actually covers: 0 matches one address, 2 matches an aligned four byte object. Getting
+this wrong is quiet. With MASK left at zero, watching a four byte variable catches a word
+store to its base address but misses a byte store two bytes in, while the debugger goes on
+reporting the whole variable as watched. So `a` takes an optional length, the address must
+be aligned to it, and the field is read back after writing because its width is
+implementation defined and a value the part cannot hold comes back smaller.
+
+```
+> a 20000000 w 4
+watchpoint 0 on write at 0x20000000
+```
 
 Watching a word, then running a routine that stores to it:
 

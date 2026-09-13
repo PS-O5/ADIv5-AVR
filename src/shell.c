@@ -41,7 +41,7 @@ static const char help_text[] PROGMEM =
     "b <addr>       set hardware breakpoint\r\n"
     "k [slot]       clear one breakpoint, or all\r\n"
     "a              list watchpoints\r\n"
-    "a <addr> [rwb] watch: r read, w write, b both\r\n"
+    "a <addr> [rwb] [len] watch: r read, w write, b both\r\n"
     "j [slot]       clear one watchpoint, or all\r\n"
     "rtt [base] [n] stream RTT output from target RAM\r\n"
     "?              this help\r\n";
@@ -664,7 +664,7 @@ static void cmd_watch_list(void)
     }
 }
 
-static void cmd_watch_set(uint32_t addr, char mode)
+static void cmd_watch_set(uint32_t addr, char mode, uint32_t len)
 {
     uint8_t function = DWT_FUNC_RW;
 
@@ -672,6 +672,16 @@ static void cmd_watch_set(uint32_t addr, char mode)
         function = DWT_FUNC_READ;
     else if (mode == 'w')
         function = DWT_FUNC_WRITE;
+
+    /* Length to MASK: 1 gives 0, 2 gives 1, 4 gives 2, 8 gives 3. */
+    uint8_t mask = 0;
+    while (mask < 16 && (1UL << mask) < len)
+        mask++;
+
+    if ((1UL << mask) != len || (addr & (len - 1))) {
+        P("length must be a power of two, address aligned to it\r\n");
+        return;
+    }
 
     for (uint8_t i = 0; i < dwt_slots(); i++) {
         uint32_t cur = 0;
@@ -685,7 +695,7 @@ static void cmd_watch_set(uint32_t addr, char mode)
         if (cur_func != DWT_FUNC_DISABLED)
             continue;
 
-        ack = dwt_set(i, addr, function);
+        ack = dwt_set(i, addr, function, mask);
         if (ack != SWD_ACK_OK) {
             report(ack);
             return;
@@ -1022,7 +1032,15 @@ static void dispatch(const char *line)
         if (parse_hex(&line, &a)) {
             while (*line == ' ')
                 line++;
-            cmd_watch_set(a, *line);
+
+            char mode = *line;
+            if (*line)
+                line++;
+
+            if (!parse_dec(&line, &b))
+                b = 1;
+
+            cmd_watch_set(a, mode, b);
         } else {
             cmd_watch_list();
         }

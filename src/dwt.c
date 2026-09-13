@@ -35,7 +35,7 @@ uint8_t dwt_init(void)
     return SWD_ACK_OK;
 }
 
-uint8_t dwt_set(uint8_t slot, uint32_t addr, uint8_t function)
+uint8_t dwt_set(uint8_t slot, uint32_t addr, uint8_t function, uint8_t mask)
 {
     if (slot >= slots)
         return DWT_NO_SLOT;
@@ -44,10 +44,25 @@ uint8_t dwt_set(uint8_t slot, uint32_t addr, uint8_t function)
     if (ack != SWD_ACK_OK)
         return ack;
 
-    /* MASK is how many low address bits to ignore; zero matches exactly. */
-    ack = mem_ap_write_word(DWT_MASK(slot), 0);
+    /*
+     * MASK is how many low address bits to ignore, so a four byte object
+     * needs 2 and zero matches one address exactly. The field width is
+     * implementation defined and a value too wide for the part reads back
+     * smaller, which would watch a narrower range than asked for while still
+     * reporting success. Read it back rather than trust the write, and leave
+     * the slot disabled if it did not take.
+     */
+    ack = mem_ap_write_word(DWT_MASK(slot), mask);
     if (ack != SWD_ACK_OK)
         return ack;
+
+    uint32_t got = 0;
+    ack = mem_ap_read_word(DWT_MASK(slot), &got);
+    if (ack != SWD_ACK_OK)
+        return ack;
+
+    if ((uint8_t)(got & 0xF) != mask)
+        return DWT_BAD_MASK;
 
     return mem_ap_write_word(DWT_FUNCTION(slot), function);
 }
