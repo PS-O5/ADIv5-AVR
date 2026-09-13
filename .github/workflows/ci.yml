@@ -1,0 +1,58 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchains
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-avr avr-libc binutils-avr gcc-arm-none-eabi
+
+      - name: Build the AVR host
+        run: make
+
+      # The Uno's bootloader occupies the top of flash, so the usable space is
+      # 32256 bytes rather than the full 32K. Running out of it is the constraint
+      # this project lives under, and it should fail here rather than at a flash.
+      - name: Check it still fits
+        run: |
+          used=$(avr-size build/firmware.elf | awk 'NR==2 {print $1 + $2}')
+          echo "flash: $used of 32256 bytes"
+          if [ "$used" -gt 32256 ]; then
+            echo "does not fit"
+            exit 1
+          fi
+
+      - name: Build the target images
+        run: make -C target
+
+      # These parsers match the exact text src/shell.c prints. Nothing else
+      # notices when that text changes.
+      - name: Test the gdb server
+        run: python3 tools/test_gdbserver.py
+
+      - name: Check the other tools parse
+        run: |
+          python3 -c "compile(open('tools/swdflash').read(), 'swdflash', 'exec')"
+          python3 -c "compile(open('tools/swdmon').read(), 'swdmon', 'exec')"
+
+      - name: Upload the firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: |
+            build/firmware.hex
+            target/blink.bin
+            target/steal.bin

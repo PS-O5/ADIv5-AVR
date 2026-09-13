@@ -1,5 +1,7 @@
 # ADIv5-AVR
 
+[![build](https://github.com/PS-O5/ADIv5-AVR/actions/workflows/ci.yml/badge.svg)](https://github.com/PS-O5/ADIv5-AVR/actions/workflows/ci.yml)
+
 An 8-bit AVR that debugs an ARM Cortex-M4. Bit-banged SWD, bare metal, no probe chip and
 no level shifter. One resistor and four jumper wires, plus one more for reset.
 
@@ -269,8 +271,10 @@ target/          a small STM32 blinky, to test the whole chain
 tools/swdflash   host side flasher: drives the shell, sends the image
 tools/swdmon     dumps whatever the board sends
 tools/gdbserver  GDB remote serial protocol, bridged onto the shell
+tools/test_*.py  tests for the above, no hardware needed
 docs/NOTES.md    engineering notes
 hardware/kicad/  schematic and PCB for the wiring
+.github/         builds both toolchains, runs the tests, checks it still fits
 ```
 
 ## References
