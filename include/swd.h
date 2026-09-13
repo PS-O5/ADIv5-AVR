@@ -14,6 +14,9 @@ void swd_idle(void);
 
 void swd_connect(void);
 
+void swd_reset_assert(void);
+void swd_reset_release(void);
+
 #define SWD_ACK_OK       1
 #define SWD_ACK_WAIT     2
 #define SWD_ACK_FAULT    4

@@ -99,6 +99,19 @@ vector catch, then SYSRESETREQ resets the chip and the core halts at the vector 
 before executing an instruction. The system reset does not touch the debug power domain,
 so the SWD connection survives it and no NRST wire is needed.
 
+SYSRESETREQ has a hole in it, which is what the NRST wire and `cr` are for. Issuing it
+needs a working debug connection, so it cannot help against firmware that reconfigures
+PA13 and PA14 as GPIO early in boot: by the time the request could be sent, the pins
+carrying it are gone. Holding NRST low breaks the circle, because the core cannot run and
+the pins stay in their SWD reset state long enough to attach and arm the vector catch
+before a single instruction executes.
+
+The debug power domain is not held by NRST, which is why the port still answers while
+reset is asserted. How early the core's own debug registers respond varies, so `cr` writes
+DHCSR and DEMCR while reset is held and then repeats the halt request after releasing,
+where VC_CORERESET has parked the core at the reset vector and the retry has something
+stable to land on.
+
 VC_HARDERR (bit 10) is armed at connect for the same reason in reverse: it halts the core
 on a hard fault instead of letting it run the handler. On a blank or half programmed chip
 the vector table holds nothing useful, so a fault otherwise jumps somewhere arbitrary and

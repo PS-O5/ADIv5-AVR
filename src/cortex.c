@@ -1,3 +1,4 @@
+#include <util/delay.h>
 #include "swd.h"
 #include "dp.h"
 #include "ap.h"
@@ -181,6 +182,57 @@ uint8_t cortex_reset_halt(void)
         uint32_t dhcsr = 0;
         if (cortex_read_dhcsr(&dhcsr) == SWD_ACK_OK && (dhcsr & DHCSR_S_HALT))
             return SWD_ACK_OK;
+        dp_clear_errors();
+    }
+
+    return SWD_TIMEOUT;
+}
+
+/*
+ * Connect with NRST held low.
+ *
+ * SYSRESETREQ cannot help when the target's own firmware reconfigures PA13 and
+ * PA14 as GPIO early in boot, because issuing it needs the debug connection
+ * that the firmware is about to take away. Holding the part in reset breaks
+ * that circle: the core cannot run, so the pins stay in their SWD reset state
+ * long enough to attach and arm the vector catch before anything executes.
+ *
+ * The debug power domain is not held by NRST, which is what makes the port
+ * reachable while reset is asserted. Whether the core's own debug registers
+ * answer that early varies, so the writes below are attempted while held and
+ * then repeated after release, where the vector catch keeps the core parked at
+ * the reset vector and gives the retry something stable to land on.
+ */
+uint8_t cortex_connect_under_reset(uint32_t *idcode)
+{
+    swd_reset_assert();
+    _delay_ms(20);
+
+    uint8_t ack = dp_connect(idcode);
+    if (ack != SWD_ACK_OK) {
+        swd_reset_release();
+        return ack;
+    }
+
+    dp_power_up();
+    dp_clear_errors();
+    mem_ap_init();
+
+    /* Best effort while the core is held: it may not answer yet. */
+    mem_ap_write_word(DHCSR, DHCSR_DBGKEY | DHCSR_C_DEBUGEN);
+    mem_ap_write_word(DEMCR, DEMCR_VC_CORERESET | DEMCR_VC_HARDERR | DEMCR_TRCENA);
+    dp_clear_errors();
+
+    swd_reset_release();
+
+    for (uint8_t i = 0; i < HALT_RETRIES; i++) {
+        uint32_t dhcsr = 0;
+
+        mem_ap_write_word(DHCSR, DHCSR_DBGKEY | DHCSR_C_DEBUGEN | DHCSR_C_HALT);
+
+        if (cortex_read_dhcsr(&dhcsr) == SWD_ACK_OK && (dhcsr & DHCSR_S_HALT))
+            return SWD_ACK_OK;
+
         dp_clear_errors();
     }
 

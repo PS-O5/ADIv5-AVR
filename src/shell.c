@@ -15,6 +15,7 @@
 
 static const char help_text[] PROGMEM =
     "c              connect\r\n"
+    "cr             connect holding NRST, for firmware that steals the pins\r\n"
     "i              ids: DPIDR, AP IDR, CPUID, DBGMCU\r\n"
     "r <addr> [sz]  read, sz 1 2 or 4 (default 4)\r\n"
     "d <addr> [n]   dump n words (default 8)\r\n"
@@ -232,6 +233,26 @@ static void cmd_connect(void)
     ack = mem_ap_init();
     if (ack == SWD_ACK_OK) {
         cortex_init();
+        fpb_init();
+        dwt_init();
+        flash_probe();
+    }
+
+    report(ack);
+}
+
+static void cmd_connect_reset(void)
+{
+    uint32_t idcode = 0;
+    uint8_t ack = cortex_connect_under_reset(&idcode);
+
+    P("DPIDR ");
+    put_hex32(idcode);
+    P("  ");
+
+    rtt_cb = 0;
+
+    if (ack == SWD_ACK_OK) {
         fpb_init();
         dwt_init();
         flash_probe();
@@ -865,6 +886,10 @@ static void dispatch(const char *line)
         line--;
         if (word_is(line, "rtt")) {
             cmd_rtt(line + 3);
+            return;
+        }
+        if (word_is(line, "cr")) {
+            cmd_connect_reset();
             return;
         }
         P("unknown command, ? for help\r\n");

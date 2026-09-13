@@ -1,7 +1,7 @@
 # ADIv5-AVR
 
 An 8-bit AVR that debugs an ARM Cortex-M4. Bit-banged SWD, bare metal, no probe chip and
-no level shifter. One resistor and four jumper wires.
+no level shifter. One resistor and four jumper wires, plus one more for reset.
 
 ```
    PC ──USB/115200── ATmega328P ──SWCLK──▶ STM32F411
@@ -10,7 +10,7 @@ no level shifter. One resistor and four jumper wires.
                        5V/16MHz              3.3V
 ```
 
-`18.9KB flash · 322B RAM` on the AVR. Halt, step, breakpoints, watchpoints, flash
+`19.3KB flash · 322B RAM` on the AVR. Halt, step, breakpoints, watchpoints, flash
 programming, RTT.
 
 ## Why
@@ -47,6 +47,7 @@ D9  (PB1) ──────┬───────────── PA13  SWD
              [2.2kΩ]
                 │
                 └───────────── 3V3
+D10 (PB2) ──────────────────── R     NRST (optional)
 ```
 
 - PA13/PA14 are 5V-tolerant, which is what makes the direct connection safe.
@@ -54,6 +55,11 @@ D9  (PB1) ──────┬───────────── PA13  SWD
 - SWDIO is never driven high. Low is driven, high is released and the resistor pulls it to
   3.3V, so SWDIO never sees 5V and cannot contend with the target.
 - A bad ground makes every logic level meaningless and looks exactly like a protocol bug.
+- NRST is optional and only needed for `cr`, connect under reset. It is the pin marked `R`
+  on the header, between `A0` and `C15`. It is driven the same way as SWDIO, pulled low or
+  released, so the internal pull-up needs no resistor here. That is worth keeping even
+  though the pin tolerates 5V: NRST is bidirectional, and the reset button and the chip's
+  own reset sources also pull it low, so driving it high would be driving into a short.
 
 ## Quick start
 
@@ -143,7 +149,7 @@ Addresses and values are hex. Counts, sizes and slots are decimal.
 
 | | | | |
 |---|---|---|---|
-| `c` | connect | `b [addr]` | list or set a breakpoint |
+| `c` `cr` | connect, or connect holding NRST | `b [addr]` | list or set a breakpoint |
 | `i` | DPIDR, AP IDR, CPUID, DBGMCU | `k [slot]` | clear breakpoints |
 | `s` | status, halted and lockup | `a [addr] [rwb] [len]` | list or set a watchpoint |
 | `r <addr> [sz]` | read, size 1, 2 or 4 | `j [slot]` | clear watchpoints |
@@ -160,7 +166,7 @@ Addresses and values are hex. Counts, sizes and slots are decimal.
 
 | | Used | Of |
 |---|---|---|
-| Flash | 18864 B | 32 KB |
+| Flash | 19274 B | 32 KB |
 | SRAM | 322 B | 2 KB |
 
 String literals live in `PROGMEM`. Before that, `.data` alone was 1396 bytes and there was

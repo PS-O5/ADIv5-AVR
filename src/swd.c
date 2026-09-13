@@ -4,6 +4,7 @@
 
 #define SWCLK_BIT PB0
 #define SWDIO_BIT PB1
+#define NRST_BIT  PB2
 
 /* Half-period in ~250ns loop iterations. 0 runs at the bit-bang loop's own rate. */
 static uint8_t half_period = 0;
@@ -43,11 +44,30 @@ static inline void swdio_listen(void)
     PORTB &= ~(1 << SWDIO_BIT);
 }
 
+/*
+ * NRST is only ever pulled low or released, never driven high. The pin is
+ * bidirectional: the reset button and the target's own reset sources pull it
+ * low too, so driving it high would mean driving into a short. The internal
+ * pull-up restores the high level, which is why this needs no resistor.
+ */
+void swd_reset_assert(void)
+{
+    DDRB |= (1 << NRST_BIT);
+    PORTB &= ~(1 << NRST_BIT);
+}
+
+void swd_reset_release(void)
+{
+    DDRB &= ~(1 << NRST_BIT);
+    PORTB &= ~(1 << NRST_BIT);
+}
+
 void swd_init(void)
 {
     DDRB |= (1 << SWCLK_BIT);
     PORTB &= ~(1 << SWCLK_BIT);
     swdio_listen();
+    swd_reset_release();
 }
 
 void swd_write_bit(uint8_t bit)
