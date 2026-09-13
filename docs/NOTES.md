@@ -437,6 +437,29 @@ same half period.
 
 ## Bugs worth remembering
 
+### The read that was never sent
+
+Peripheral reads through gdb started failing with "Cannot access memory", while the same
+read typed into the shell returned the right value. The target was plainly fine, so the
+fault had to be in the tool, and the obvious suspects were the read path and the serial
+framing. Both were wrong.
+
+The packet log settled it: the read packet was not in it. Not failing, absent. gdb had
+refused the access itself and never asked.
+
+The cause was the memory map added a few changes earlier. Once a target supplies one, gdb
+treats every address outside it as inaccessible and fails the access locally. The map
+listed flash and SRAM, so the whole peripheral space, the private peripheral bus and the
+system memory region silently became unreachable. Reads had worked before the map existed,
+which is exactly the sort of correlation that gets missed when the change looks unrelated
+to the symptom.
+
+Two things generalise. A missing request and a rejected request give the user the same
+error and completely different logs, so the question worth asking early is what actually
+crossed the wire, not what the far end thought of it. And a memory map has to be complete
+rather than merely correct: everything worth reading belongs in it, not just everything
+worth writing.
+
 ### A failed unlock that keeps itself failing
 
 Unlock started returning `ack=0x04`, a bus fault, and kept returning it on every later

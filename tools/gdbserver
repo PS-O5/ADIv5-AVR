@@ -79,6 +79,18 @@ FLASH_BASE = 0x08000000
 RAM_BASE = 0x20000000
 RAM_SIZE = 0x20000  # 128KB, fixed across the F411 family regardless of flash size
 
+# Anything the map does not mention, gdb refuses to touch: it fails the access
+# locally and never sends a packet at all. So every region worth reading has to
+# be named here, not just the ones worth writing.
+OTHER_REGIONS = [
+    # System memory, OTP and option bytes. Holds the flash size register.
+    ("rom", 0x1FFF0000, 0x10000),
+    # All four peripheral buses.
+    ("ram", 0x40000000, 0x20000000),
+    # Private peripheral bus: SCS, DWT, FPB and the CoreSight ROM table.
+    ("ram", 0xE0000000, 0x10000000),
+]
+
 # Filled in once at connect time from the shell's own "f" command, which reads
 # the size straight from the chip rather than assuming one part.
 flash_size = None
@@ -90,7 +102,11 @@ def build_memory_map_xml(sectors):
     refuses outright with no attempt. "flash" tells GDB it needs the
     dedicated vFlashErase/vFlashWrite/vFlashDone protocol instead of a plain
     write, which is also what keeps GDB from patching a software breakpoint
-    directly into it as if it were ordinary writable memory."""
+    directly into it as if it were ordinary writable memory.
+
+    The map has to be complete, not just correct. gdb blocks any access to an
+    address the map does not cover, locally, without sending a packet, so an
+    omitted region looks exactly like a target that cannot be read."""
     lines = [
         '<?xml version="1.0"?>',
         '<!DOCTYPE memory-map',
@@ -103,6 +119,8 @@ def build_memory_map_xml(sectors):
         lines.append('    <property name="blocksize">0x%x</property>' % size)
         lines.append('  </memory>')
     lines.append('  <memory type="ram" start="0x%08x" length="0x%x"/>' % (RAM_BASE, RAM_SIZE))
+    for kind, base, size in OTHER_REGIONS:
+        lines.append('  <memory type="%s" start="0x%08x" length="0x%x"/>' % (kind, base, size))
     lines.append('</memory-map>')
     lines.append('')
     return "\n".join(lines).encode()
@@ -163,6 +181,14 @@ class AvrShell:
         raise RuntimeError("no prompt from the host after %.0fs" % timeout)
 
     def _send_once(self, line, timeout):
+        # Drop anything still unread before asking the next question. A reply
+        # that arrived after its own read timed out is still sitting in the
+        # buffer, and reading it here would answer this command with the
+        # previous command's output and shift every reply after it by one.
+        # That failure is silent and permanent, so it is worth one flush per
+        # command to make it impossible.
+        termios.tcflush(self.fd, termios.TCIFLUSH)
+
         os.write(self.fd, (line + "\r").encode())
         reply = self._read_until_prompt(timeout)
         if reply is None:
@@ -414,6 +440,7 @@ class Bridge:
             words.extend(rest.split())
 
         if len(words) < count or any(w == "--------" for w in words[:count]):
+            print("read of 0x%08x failed: %r" % (addr, reply))
             return None
 
         full_hex = "".join(word_to_le_hex(int(w, 16)) for w in words[:count])
