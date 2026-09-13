@@ -2,6 +2,7 @@
 #include "swd.h"
 #include "ap.h"
 #include "flash.h"
+#include "target.h"
 
 /*
  * Real time, not poll counts. A retry count is a proxy for time that silently
@@ -21,6 +22,9 @@ static uint8_t sectors;
  */
 uint8_t flash_probe(void)
 {
+    if (!target_flash_ok())
+        return TARGET_UNKNOWN;
+
     uint16_t kb = 0;
     uint8_t ack = mem_ap_read16(FLASH_SIZE_REG, &kb);
     if (ack != SWD_ACK_OK)
@@ -166,6 +170,9 @@ static uint8_t flash_finish(uint8_t ack, uint32_t sr)
 
 uint8_t flash_program_word(uint32_t addr, uint32_t value)
 {
+    if (!target_flash_ok())
+        return TARGET_UNKNOWN;
+
     uint32_t sr = 0;
     uint8_t ack = flash_wait_busy(&sr);
     if (ack != SWD_ACK_OK)
@@ -256,6 +263,9 @@ uint8_t flash_verify(uint32_t addr, const uint32_t *words, uint16_t count)
 
 uint8_t flash_erase_sector(uint8_t sector)
 {
+    if (!target_flash_ok())
+        return TARGET_UNKNOWN;
+
     if (sectors && sector >= sectors)
         return FLASH_ERR;
 
@@ -289,6 +299,9 @@ uint8_t flash_erase_sector(uint8_t sector)
 
 uint8_t flash_mass_erase(void)
 {
+    if (!target_flash_ok())
+        return TARGET_UNKNOWN;
+
     uint32_t sr = 0;
     uint8_t ack = flash_wait_busy(&sr);
     if (ack != SWD_ACK_OK)
@@ -361,6 +374,9 @@ static uint8_t flash_option_unlock(void)
  */
 uint8_t flash_remove_readout_protection(void)
 {
+    if (!target_flash_ok())
+        return TARGET_UNKNOWN;
+
     uint8_t level = 0;
     uint8_t ack = flash_rdp_level(&level);
     if (ack != SWD_ACK_OK)

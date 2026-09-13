@@ -7,6 +7,7 @@
 #include "fpb.h"
 #include "dwt.h"
 #include "rtt.h"
+#include "target.h"
 #include "uart.h"
 #include "xmodem.h"
 #include "shell.h"
@@ -16,6 +17,7 @@
 static const char help_text[] PROGMEM =
     "c              connect\r\n"
     "cr             connect holding NRST, for firmware that steals the pins\r\n"
+    "force          run flash commands on an unrecognised part anyway\r\n"
     "i              ids: DPIDR, AP IDR, CPUID, DBGMCU\r\n"
     "r <addr> [sz]  read, sz 1 2 or 4 (default 4)\r\n"
     "d <addr> [n]   dump n words (default 8)\r\n"
@@ -211,6 +213,33 @@ static uint8_t halt_for_flash(void)
     return ack;
 }
 
+static void report_target(void)
+{
+    char name[TARGET_NAME_MAX];
+
+    P("DEV    ");
+    put_hex32(target_dev_id());
+    P("  rev ");
+    put_hex32(target_rev_id());
+    P("  ");
+
+    if (target_name(name)) {
+        P("STM32");
+        uart_puts(name);
+    } else {
+        P("unrecognised");
+    }
+
+    if (target_flash_ok()) {
+        if (target_forced())
+            P("  flash: forced\r\n");
+        else
+            P("  flash: ok\r\n");
+    } else {
+        P("  flash: refused, driver is F4 only\r\n");
+    }
+}
+
 static void cmd_connect(void)
 {
     uint32_t idcode = 0;
@@ -235,10 +264,14 @@ static void cmd_connect(void)
         cortex_init();
         fpb_init();
         dwt_init();
+        target_identify();
         flash_probe();
     }
 
     report(ack);
+
+    if (ack == SWD_ACK_OK)
+        report_target();
 }
 
 static void cmd_connect_reset(void)
@@ -255,10 +288,14 @@ static void cmd_connect_reset(void)
     if (ack == SWD_ACK_OK) {
         fpb_init();
         dwt_init();
+        target_identify();
         flash_probe();
     }
 
     report(ack);
+
+    if (ack == SWD_ACK_OK)
+        report_target();
 }
 
 static void cmd_ids(void)
@@ -282,10 +319,12 @@ static void cmd_ids(void)
     put_hex32(v);
     nl();
 
-    mem_ap_read_word(0xE0042000UL, &v);
+    mem_ap_read_word(DBGMCU_IDCODE, &v);
     P("DBGMCU ");
     put_hex32(v);
     nl();
+
+    report_target();
 }
 
 static void cmd_dump(uint32_t addr, uint32_t count)
@@ -890,6 +929,11 @@ static void dispatch(const char *line)
         }
         if (word_is(line, "cr")) {
             cmd_connect_reset();
+            return;
+        }
+        if (word_is(line, "force")) {
+            target_force();
+            P("flash driver forced on, it is written for the F4 only\r\n");
             return;
         }
         P("unknown command, ? for help\r\n");

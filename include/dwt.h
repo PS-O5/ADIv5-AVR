@@ -19,7 +19,7 @@
 #define DWT_FUNC_MATCHED (1UL << 24)
 
 #define DWT_NO_SLOT 0xF7
-#define DWT_BAD_MASK 0xF6
+#define DWT_BAD_MASK 0xF4
 
 uint8_t dwt_init(void);
 uint8_t dwt_slots(void);

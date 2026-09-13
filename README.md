@@ -10,7 +10,7 @@ no level shifter. One resistor and four jumper wires, plus one more for reset.
                        5V/16MHz              3.3V
 ```
 
-`19.3KB flash · 322B RAM` on the AVR. Halt, step, breakpoints, watchpoints, flash
+`20.1KB flash · 339B RAM` on the AVR. Halt, step, breakpoints, watchpoints, flash
 programming, RTT.
 
 ## Why
@@ -85,7 +85,8 @@ gdb-multiarch target/blink.elf -ex 'target remote localhost:3333'
 DPIDR  0x2BA01477     ARM SW-DP
 AP IDR 0x24770011     AHB-AP
 CPUID  0x410FC241     Cortex-M4 r0p1
-DBGMCU 0x10006431     STM32F411
+DBGMCU 0x10006431
+DEV    0x00000431  rev 0x00001000  STM32F411  flash: ok
 ```
 
 ## Architecture
@@ -153,6 +154,7 @@ Addresses and values are hex. Counts, sizes and slots are decimal. `?` prints th
 |---|---|---|---|
 | `c` | connect | `r <addr> [sz]` | read, size 1, 2 or 4 |
 | `cr` | connect holding NRST | `w <addr> <val> [sz]` | write, same sizes |
+| `force` | allow flash on an unrecognised part | | |
 | `i` | DPIDR, AP IDR, CPUID, DBGMCU | `d <addr> [n]` | dump n words |
 
 | Execution | | Breakpoints and watchpoints | |
@@ -223,8 +225,8 @@ is not. There is one core and one thread, so thread commands do nothing.
 
 | | Used | Of |
 |---|---|---|
-| Flash | 19274 B | 32 KB |
-| SRAM | 322 B | 2 KB |
+| Flash | 20558 B | 32 KB |
+| SRAM | 339 B | 2 KB |
 
 String literals live in `PROGMEM`. Before that, `.data` alone was 1396 bytes and there was
 barely enough stack left for XMODEM's 128 byte buffer.
@@ -234,6 +236,11 @@ barely enough stack left for XMODEM's 128 byte buffer.
 - Tested against an STM32F411 (Black Pill). The SWD, DP, AP and Cortex-M layers are
   architectural and should hold for any Cortex-M, but `flash.c` is written to the
   F4 flash controller and nothing else has been tried.
+- The device id from DBGMCU decides whether the flash commands run at all. `flash.c`
+  implements the F4 sector algorithm and nothing else, and pointed at a part with a
+  different flash controller it would write plausible values into registers that mean
+  something else. An unrecognised part is reported and refused rather than risked. `force`
+  overrides that, for porting.
 - `tools/gdbserver` speaks the GDB remote serial protocol on the PC side, driving the
   shell underneath. Registers, memory, breakpoints, watchpoints, continue, step and
   `load`, confirmed against real hardware. The memory map, read live from the chip's own

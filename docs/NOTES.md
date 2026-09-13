@@ -492,6 +492,26 @@ same value twice in a row is normal rather than a failure: the blink half period
 100ms and a read takes a few milliseconds, so consecutive reads usually land inside the
 same half period.
 
+### Knowing the part before erasing it
+
+`flash.c` is written to the F4 flash controller: KEYR at `0x40023C04`, sector numbers in
+CR, PSIZE, the sector map that goes 16KB four times, then 64KB, then 128KB. None of that is
+shared across the STM32 range. An F1 uses page erase with a different register layout at a
+different base, and the F4 sequence aimed at one would write values that mean something
+else entirely into registers that exist, which is worse than failing.
+
+So the device id in DBGMCU_IDCODE at `0xE0042000` gates the destructive commands. The low
+12 bits are the device id, the top 16 the revision. The gate lives in `flash.c` rather than
+in the command handlers, so the XMODEM loader and anything else added later inherits it
+instead of having to remember.
+
+The flash size register is itself family specific, `0x1FFF7A22` on F4, `0x1FFFF7E0` on F1,
+`0x1FFF75E0` on L4. Reading it on an unidentified part gives a number that means nothing,
+so the size probe is gated too and an unknown part reports its ids and stops there.
+
+`force` exists because refusing outright would block the one person who most needs the
+tool: whoever is porting it to a new family.
+
 ## Bugs worth remembering
 
 ### The read that was never sent
